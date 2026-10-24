@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS5 ROM Sync</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #171b22; --panel2: #1f2530; --line: #2b3240;
+    --text: #e6e9ef; --muted: #8b94a7; --accent: #3b82f6; --accent2: #2563eb;
+    --ok: #22c55e; --warn: #f59e0b; --err: #ef4444; --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 20px 16px 8px; max-width: 960px; margin: 0 auto;
+           display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 22px; margin: 0; flex: 1; }
+  header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  header .dot.ok { background: var(--ok); } header .dot.err { background: var(--err); }
+  main { max-width: 960px; margin: 0 auto; padding: 8px 16px 48px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+           padding: 16px; margin-bottom: 16px; }
+  .panel h2 { font-size: 15px; margin: 0 0 12px; color: var(--muted); font-weight: 600;
+              text-transform: uppercase; letter-spacing: .04em; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+  .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 140px; }
+  .field.small { flex: 0 0 110px; min-width: 90px; }
+  label { font-size: 12px; color: var(--muted); }
+  input, select { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+                  border-radius: 8px; padding: 9px 10px; font: inherit; width: 100%; }
+  input:focus, select:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+           border-radius: 8px; padding: 9px 14px; font: inherit; cursor: pointer; white-space: nowrap; }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { background: var(--accent2); }
+  button.danger { color: var(--err); }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .hint.ok { color: var(--ok); } .hint.err { color: var(--err); }
+  .jobs { display: grid; gap: 12px; }
+  .job { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+  .job-top { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .job-title { flex: 1; min-width: 200px; }
+  .job-title b { display: block; font-size: 16px; }
+  .job-title span { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--panel2);
+           border: 1px solid var(--line); color: var(--muted); }
+  .badge.running { color: var(--accent); border-color: var(--accent); }
+  .badge.done { color: var(--ok); border-color: var(--ok); }
+  .badge.error { color: var(--err); border-color: var(--err); }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .bar { height: 6px; background: var(--panel2); border-radius: 99px; overflow: hidden; margin-top: 12px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  .job-status { font-size: 13px; color: var(--muted); margin-top: 6px; overflow-wrap: anywhere; }
+  .add { width: 100%; padding: 22px; border: 2px dashed var(--line); background: transparent;
+         border-radius: var(--radius); font-size: 28px; color: var(--muted); }
+  .add:hover { border-color: var(--accent); color: var(--accent); }
+  .empty { text-align: center; color: var(--muted); padding: 8px 0 4px; }
+  .log { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; max-height: 220px; overflow: auto;
+         background: var(--bg); border-radius: 8px; padding: 10px; white-space: pre-wrap; color: var(--muted); }
+  .log .ERROR { color: var(--err); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+           border-radius: var(--radius); padding: 0; width: min(560px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog form { padding: 20px; display: grid; gap: 12px; }
+  dialog h3 { margin: 0; }
+  .targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+  .target { text-align: left; padding: 10px; }
+  .target.sel { border-color: var(--accent); background: rgba(59,130,246,.12); }
+  .browse { display: flex; gap: 6px; }
+  .browse input { flex: 1; }
+  .picker { border: 1px solid var(--line); border-radius: 8px; max-height: 180px; overflow: auto; display: none; }
+  .picker.open { display: block; }
+  .picker div { padding: 7px 10px; cursor: pointer; border-bottom: 1px solid var(--line); }
+  .picker div:hover { background: var(--panel2); }
+  .check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+  .check input { width: auto; }
+  .foot { display: flex; justify-content: flex-end; gap: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="connDot" title="PS5 connection"></span>
+  <h1>PS5 ROM Sync</h1>
+  <button id="runAll">Sync all</button>
+</header>
+<main>
+  <section class="panel">
+    <h2>Your PS5</h2>
+    <div class="row">
+      <div class="field"><label for="host">PS5 IP address</label><input id="host" placeholder="192.168.1.50"></div>
+      <div class="field small"><label for="port">FTP port</label><input id="port" type="number" placeholder="2121"></div>
+      <div class="field small"><label for="user">User</label><input id="user" placeholder="anonymous"></div>
+      <div class="field small"><label for="password">Password</label><input id="password" type="password"></div>
+      <button id="savePs5" class="primary">Save</button>
+      <button id="testPs5">Test</button>
+    </div>
+    <div class="hint" id="ps5Hint">Start an FTP server on the PS5 first (ftpsrv uses port 2121, etaHEN's built-in FTP uses 1337).</div>
+  </section>
+
+  <section>
+    <div class="jobs" id="jobs"></div>
+    <div style="margin-top:12px"><button class="add" id="addBtn" title="Add a library to sync">+</button></div>
+    <p class="empty" id="emptyHint">Hit <b>+</b> to add a library: pick a folder and choose RetroArch, Porpoise, or a custom place on the PS5.</p>
+  </section>
+
+  <section class="panel" style="margin-top:16px">
+    <h2>Activity</h2>
+    <div class="log" id="log">Nothing yet.</div>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="jobForm">
+    <h3 id="dlgTitle">Add a library</h3>
+    <div>
+      <label>Sync to</label>
+      <div class="targets" id="targets"></div>
+      <div class="hint" id="targetHelp"></div>
+    </div>
+    <div class="field">
+      <label for="source">Library folder (inside the container's library mount)</label>
+      <div class="browse"><input id="source" placeholder="/ (whole library)"><button type="button" id="browseBtn">Browse</button></div>
+      <div class="picker" id="picker"></div>
+    </div>
+    <div class="field" id="subfolderField">
+      <label for="subfolder">RetroArch system folder</label>
+      <input id="subfolder" list="systems" placeholder="snes">
+      <datalist id="systems"></datalist>
+    </div>
+    <div class="field">
+      <label for="remote">Folder on the PS5</label>
+      <input id="remote">
+    </div>
+    <div class="row">
+      <div class="field"><label for="exts">Only these file types (blank = everything)</label><input id="exts" placeholder="zip, sfc, smc"></div>
+      <div class="field small"><label for="interval">Auto-sync (min)</label><input id="interval" type="number" min="0" placeholder="0 = off"></div>
+    </div>
+    <div class="field"><label for="name">Name</label><input id="name" placeholder="SNES to RetroArch"></div>
+    <label class="check"><input type="checkbox" id="mirror"> Delete files on the PS5 that are no longer in the library</label>
+    <div class="foot">
+      <button type="button" class="danger" id="deleteJob" style="margin-right:auto;display:none">Delete</button>
+      <button type="button" id="cancelDlg">Cancel</button>
+      <button type="submit" class="primary" id="saveJob">Save</button>
+    </div>
+    <div class="hint err" id="formErr"></div>
+  </form>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let meta = { presets: {}, retroarch_systems: [] };
+let jobs = [];
+let runs = {};
+let editing = null;
+let target = "retroarch";
+let remoteTouched = false;
+let extsTouched = false;
+
+async function api(method, url, body) {
+  const res = await fetch(url, { method, headers: { "Content-Type": "application/json" },
+                                 body: body === undefined ? undefined : JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return (n / 1024 ** i).toFixed(i ? 1 : 0) + " " + u[i];
+}
+
+async function loadPs5() {
+  const p = await api("GET", "/api/ps5");
+  $("host").value = p.host; $("port").value = p.port; $("user").value = p.user; $("password").value = p.password;
+}
+
+function ps5Form() {
+  return { host: $("host").value, port: $("port").value || 2121, user: $("user").value, password: $("password").value };
+}
+
+$("savePs5").onclick = async () => {
+  try { await api("PUT", "/api/ps5", ps5Form()); hint("Saved.", "ok"); testPs5(); }
+  catch (e) { hint(e.message, "err"); }
+};
+$("testPs5").onclick = () => testPs5();
+
+async function testPs5() {
+  hint("Connecting…");
+  const r = await api("POST", "/api/ps5/test", ps5Form());
+  $("connDot").className = "dot " + (r.ok ? "ok" : "err");
+  hint(r.ok ? `Connected. ${r.welcome || ""}` : `Could not connect: ${r.error}`, r.ok ? "ok" : "err");
+}
+
+function hint(text, cls = "") { $("ps5Hint").textContent = text; $("ps5Hint").className = "hint " + cls; }
+
+function renderTargets() {
+  $("targets").innerHTML = Object.entries(meta.presets).map(([key, p]) =>
+    `<button type="button" class="target ${key === target ? "sel" : ""}" data-key="${key}">${esc(p.label)}</button>`).join("");
+  $("targets").querySelectorAll(".target").forEach((b) => b.onclick = () => selectTarget(b.dataset.key));
+  const p = meta.presets[target] || {};
+  $("targetHelp").textContent = p.help || "";
+  $("subfolderField").style.display = p.needs_subfolder ? "" : "none";
+}
+
+function selectTarget(key) {
+  target = key;
+  renderTargets();
+  if (!extsTouched) $("exts").value = (meta.presets[key].extensions || []).join(", ");
+  updateRemote();
+}
+
+function updateRemote() {
+  if (remoteTouched) return;
+  const p = meta.presets[target];
+  const sub = p.needs_subfolder ? $("subfolder").value.trim().replace(/^\/+|\/+$/g, "") : "";
+  $("remote").value = p.remote_base + (sub ? "/" + sub : "");
+}
+
+$("subfolder").oninput = updateRemote;
+$("remote").oninput = () => remoteTouched = true;
+$("exts").oninput = () => extsTouched = true;
+$("source").oninput = () => {
+  if (meta.presets[target]?.needs_subfolder && !$("subfolder").dataset.touched) {
+    const last = $("source").value.split("/").filter(Boolean).pop() || "";
+    const guess = meta.retroarch_systems.find((s) => s === last.toLowerCase());
+    if (guess) { $("subfolder").value = guess; updateRemote(); }
+  }
+};
+$("subfolder").addEventListener("input", () => $("subfolder").dataset.touched = "1");
+
+async function browse(path) {
+  try {
+    const r = await api("GET", "/api/browse?path=" + encodeURIComponent(path));
+    const items = [];
+    if (r.path) items.push(`<div data-p="${esc(r.path.split("/").slice(0, -1).join("/"))}">⬑ ..</div>`);
+    items.push(`<div data-p="${esc(r.path)}" data-pick="1">✓ Use /${esc(r.path)}</div>`);
+    r.dirs.forEach((d) => items.push(`<div data-p="${esc((r.path ? r.path + "/" : "") + d)}">📁 ${esc(d)}</div>`));
+    $("picker").innerHTML = items.join("");
+    $("picker").classList.add("open");
+    $("picker").querySelectorAll("div").forEach((el) => el.onclick = () => {
+      if (el.dataset.pick) {
+        $("source").value = el.dataset.p; $("picker").classList.remove("open");
+        $("source").oninput();
+      } else browse(el.dataset.p);
+    });
+  } catch (e) { $("formErr").textContent = e.message; }
+}
+$("browseBtn").onclick = () => $("picker").classList.contains("open")
+  ? $("picker").classList.remove("open") : browse($("source").value.replace(/^\/+/, ""));
+
+function openDialog(job) {
+  editing = job || null;
+  remoteTouched = !!job; extsTouched = !!job;
+  delete $("subfolder").dataset.touched;
+  $("dlgTitle").textContent = job ? "Edit sync" : "Add a library";
+  $("deleteJob").style.display = job ? "" : "none";
+  $("formErr").textContent = "";
+  $("picker").classList.remove("open");
+  $("source").value = job?.source || "";
+  $("subfolder").value = job?.subfolder || "";
+  $("name").value = job?.name || "";
+  $("interval").value = job?.interval_minutes || "";
+  $("mirror").checked = !!job?.mirror_deletes;
+  target = job?.target || (jobs.some((j) => j.target === "retroarch") ? "porpoise" : "retroarch");
+  if (jobs.some((j) => j.target === "porpoise") && jobs.some((j) => j.target === "retroarch") && !job) target = "custom";
+  renderTargets();
+  $("exts").value = job ? job.extensions.join(", ") : (meta.presets[target].extensions || []).join(", ");
+  if (job) $("remote").value = job.remote_path; else { remoteTouched = false; updateRemote(); }
+  $("dlg").showModal();
+}
+
+$("addBtn").onclick = () => openDialog();
+$("cancelDlg").onclick = () => $("dlg").close();
+$("deleteJob").onclick = async () => {
+  if (!editing || !confirm(`Delete "${editing.name}"? Files already on the PS5 stay there.`)) return;
+  await api("DELETE", `/api/jobs/${editing.id}`);
+  $("dlg").close(); loadJobs();
+};
+
+$("jobForm").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const body = {
+    target, source: $("source").value.replace(/^\/+/, ""), subfolder: $("subfolder").value.trim(),
+    remote_path: $("remote").value.trim(), extensions: $("exts").value,
+    interval_minutes: Number($("interval").value || 0), mirror_deletes: $("mirror").checked,
+    name: $("name").value.trim(),
+  };
+  if (!body.name) {
+    const label = meta.presets[target].label.replace(/ \(.*\)/, "");
+    body.name = `${body.subfolder || body.source.split("/").pop() || "Library"} → ${label}`;
+  }
+  try {
+    if (editing) await api("PUT", `/api/jobs/${editing.id}`, body);
+    else await api("POST", "/api/jobs", body);
+    $("dlg").close(); loadJobs();
+  } catch (e) { $("formErr").textContent = e.message; }
+};
+
+async function loadJobs() { jobs = await api("GET", "/api/jobs"); renderJobs(); }
+
+function renderJobs() {
+  $("emptyHint").style.display = jobs.length ? "none" : "";
+  $("jobs").innerHTML = jobs.map((j) => {
+    const r = runs[j.id];
+    const state = r?.state || "idle";
+    const pct = r && r.bytes_total ? Math.round(100 * r.bytes_done / r.bytes_total) : (state === "done" ? 100 : 0);
+    let status = "Not synced yet.";
+    if (r) {
+      if (state === "running") status = `${r.files_done}/${r.files_total} files · ${fmtBytes(r.bytes_done)} of ${fmtBytes(r.bytes_total)}${r.current_file ? " · " + r.current_file : ""}`;
+      else if (state === "queued") status = "Waiting for another sync to finish…";
+      else status = `${r.message}${r.finished_at ? " · " + new Date(r.finished_at * 1000).toLocaleString() : ""}`;
+    }
+    const busy = state === "running" || state === "queued";
+    return `<div class="job">
+      <div class="job-top">
+        <div class="job-title"><b>${esc(j.name)}</b>
+          <span>/${esc(j.source)} → ${esc(j.remote_path)}${j.interval_minutes ? ` · every ${j.interval_minutes} min` : ""}</span></div>
+        <span class="badge ${state}">${state}</span>
+        <div class="actions">
+          ${busy ? `<button data-a="cancel" data-id="${j.id}">Stop</button>`
+                 : `<button class="primary" data-a="run" data-id="${j.id}">Sync now</button>`}
+          <button data-a="edit" data-id="${j.id}">Edit</button>
+        </div>
+      </div>
+      <div class="bar"><div style="width:${pct}%"></div></div>
+      <div class="job-status">${esc(status)}</div>
+    </div>`;
+  }).join("");
+  $("jobs").querySelectorAll("button[data-a]").forEach((b) => b.onclick = async () => {
+    const id = b.dataset.id;
+    if (b.dataset.a === "run") await api("POST", `/api/jobs/${id}/run`);
+    if (b.dataset.a === "cancel") await api("POST", `/api/jobs/${id}/cancel`);
+    if (b.dataset.a === "edit") return openDialog(jobs.find((j) => j.id === id));
+    poll();
+  });
+}
+
+$("runAll").onclick = async () => { await api("POST", "/api/jobs/run-all"); poll(); };
+
+async function poll() {
+  try {
+    const s = await api("GET", "/api/status");
+    runs = s.runs;
+    renderJobs();
+    const log = $("log");
+    const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 10;
+    log.innerHTML = s.logs.length ? s.logs.map((l) =>
+      `<div class="${l.level}">${new Date(l.t * 1000).toLocaleTimeString()}  ${esc(l.msg)}</div>`).join("") : "Nothing yet.";
+    if (atBottom) log.scrollTop = log.scrollHeight;
+  } catch (e) { /* server restarting */ }
+}
+
+(async () => {
+  meta = await api("GET", "/api/meta");
+  $("systems").innerHTML = meta.retroarch_systems.map((s) => `<option value="${s}">`).join("");
+  await loadPs5();
+  await loadJobs();
+  if ($("host").value) testPs5();
+  poll();
+  setInterval(poll, 1500);
+})();
+</script>
+</body>
+</html>
