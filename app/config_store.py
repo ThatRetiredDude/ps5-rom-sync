@@ -14,6 +14,12 @@ DEFAULT_CONFIG = {
         "password": "",
         "passive": True,
     },
+    "romm": {
+        "url": os.environ.get("ROMM_URL", ""),
+        "user": os.environ.get("ROMM_USER", ""),
+        "password": os.environ.get("ROMM_PASSWORD", ""),
+        "token": os.environ.get("ROMM_TOKEN", ""),
+    },
     "jobs": [],
 }
 
@@ -27,6 +33,9 @@ JOB_FIELDS = {
     "interval_minutes": 0,
     "mirror_deletes": False,
     "enabled": True,
+    # Set one of these to pick the files from RomM instead of a library folder.
+    "romm_platform_id": None,
+    "romm_collection_id": None,
 }
 
 _lock = threading.RLock()
@@ -51,6 +60,7 @@ class ConfigStore:
             data = {}
         merged = json.loads(json.dumps(DEFAULT_CONFIG))
         merged["ps5"].update(data.get("ps5", {}))
+        merged["romm"].update(data.get("romm", {}))
         merged["jobs"] = data.get("jobs", [])
         return merged
 
@@ -79,6 +89,19 @@ class ConfigStore:
             self.save()
             return dict(ps5)
 
+    def get_romm(self):
+        with _lock:
+            return dict(self.data["romm"])
+
+    def set_romm(self, values):
+        with _lock:
+            romm = self.data["romm"]
+            for key in ("url", "user", "password", "token"):
+                if key in values:
+                    romm[key] = str(values[key] or "").strip()
+            self.save()
+            return dict(romm)
+
     def list_jobs(self):
         with _lock:
             return [dict(j) for j in self.data["jobs"]]
@@ -100,6 +123,10 @@ class ConfigStore:
         job["interval_minutes"] = max(0, int(job["interval_minutes"] or 0))
         job["mirror_deletes"] = bool(job["mirror_deletes"])
         job["enabled"] = bool(job["enabled"])
+        for key in ("romm_platform_id", "romm_collection_id"):
+            job[key] = int(job[key]) if job[key] not in (None, "") else None
+        if job["romm_collection_id"] is not None:
+            job["romm_platform_id"] = None
         job["remote_path"] = "/" + str(job["remote_path"]).strip().strip("/")
         return job
 

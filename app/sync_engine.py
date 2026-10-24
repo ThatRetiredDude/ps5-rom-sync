@@ -8,6 +8,9 @@ import posixpath
 import threading
 import time
 
+from . import romm
+from .presets import PRESETS
+
 log = logging.getLogger("romsync")
 
 LIBRARY_ROOT = os.environ.get("LIBRARY_ROOT", "/roms")
@@ -160,27 +163,79 @@ class JobRun:
         return {k: v for k, v in self.__dict__.items() if k != "cancel_event"}
 
 
-def run_sync(job, ps5, run: JobRun, logger=log):
+def _local_entries(full, rel, extensions):
+    """(rel, full, size) for one library file, or for every file inside a folder."""
+    if os.path.isdir(full):
+        for sub, path, size in walk_local(full, extensions):
+            yield f"{rel}/{sub}", path, size
+    elif os.path.isfile(full):
+        exts = {e.lower() for e in extensions}
+        if not exts or full.rsplit(".", 1)[-1].lower() in exts:
+            yield rel, full, os.path.getsize(full)
+
+
+def plan_files(job, romm_settings=None, logger=log):
+    """Work out what to copy. Returns (files, mirror_root): files are
+    (label, local_path, size, remote_path); mirror_root is set when every file lives under
+    one PS5 folder, which is what "delete files no longer in the library" needs."""
+    remote_root = job["remote_path"].rstrip("/") or "/"
+    platform_id, collection_id = job.get("romm_platform_id"), job.get("romm_collection_id")
+
+    if platform_id is None and collection_id is None:
+        src = resolve_source(job["source"])
+        if not os.path.isdir(src):
+            raise FileNotFoundError(f"Source folder not found: {job['source'] or '/'}")
+        files = [(rel, full, size, posixpath.join(remote_root, rel))
+                 for rel, full, size in walk_local(src, job["extensions"])]
+        return files, remote_root
+
+    client = romm.RommClient(romm_settings or {})
+    roms = client.roms(platform_id=platform_id, collection_id=collection_id)
+    files, missing = [], 0
+    for rom in roms:
+        if platform_id is not None:
+            root, exts = remote_root, job["extensions"]
+        else:
+            where = romm.suggest_target(romm.rom_platform_slug(rom))
+            if not where:
+                logger.info("[%s] skipped %s: no PS5 target for platform '%s'", job["name"],
+                            rom.get("fs_name"), romm.rom_platform_slug(rom))
+                continue
+            root = where["remote_path"]
+            exts = job["extensions"] or PRESETS[where["target"]]["extensions"]
+        rel_local = romm.rom_relpath(rom)
+        try:
+            full = resolve_source(rel_local)
+        except ValueError:
+            missing += 1
+            continue
+        found = list(_local_entries(full, rom["fs_name"], exts))
+        if not found and not os.path.exists(full):
+            missing += 1
+            logger.warning("[%s] %s is in RomM but not in the library mount", job["name"], rel_local)
+        files.extend((rel, path, size, posixpath.join(root, rel)) for rel, path, size in found)
+    if roms and missing == len(roms):
+        raise FileNotFoundError(f"None of RomM's files were found under {LIBRARY_ROOT}. "
+                                "Mount RomM's library folder there.")
+    return files, (remote_root if platform_id is not None else None)
+
+
+def run_sync(job, ps5, run: JobRun, logger=log, romm_settings=None):
     run.state = "running"
     run.started_at = time.time()
-    src = resolve_source(job["source"])
-    if not os.path.isdir(src):
-        raise FileNotFoundError(f"Source folder not found: {job['source'] or '/'}")
-    remote_root = job["remote_path"].rstrip("/") or "/"
-
-    files = list(walk_local(src, job["extensions"]))
+    files, mirror_root = plan_files(job, romm_settings, logger)
     run.files_total = len(files)
-    run.bytes_total = sum(size for _, _, size in files)
+    run.bytes_total = sum(f[2] for f in files)
     logger.info("[%s] %d local files (%.1f MB) -> %s", job["name"], len(files),
-                run.bytes_total / 1e6, remote_root)
+                run.bytes_total / 1e6, mirror_root or "PS5 (per system)")
 
     ftp = connect(ps5)
     try:
         tree = RemoteTree(ftp)
-        tree.ensure_dir(remote_root)
+        if mirror_root:
+            tree.ensure_dir(mirror_root)
         to_upload = []
-        for rel, full, size in files:
-            remote = posixpath.join(remote_root, rel)
+        for rel, full, size, remote in files:
             rdir, rname = posixpath.split(remote)
             listing = tree.listdir(rdir) or {}
             if listing.get(rname) == size:
@@ -202,9 +257,9 @@ def run_sync(job, ps5, run: JobRun, logger=log):
             run.files_done += 1
             logger.info("[%s] uploaded %s", job["name"], rel)
 
-        if job.get("mirror_deletes"):
-            local = {rel for rel, _, _ in files}
-            _mirror_deletes(ftp, tree, remote_root, "", local, job["extensions"], run, job, logger)
+        if job.get("mirror_deletes") and mirror_root:
+            local = {posixpath.relpath(remote, mirror_root) for _, _, _, remote in files}
+            _mirror_deletes(ftp, tree, mirror_root, "", local, job["extensions"], run, job, logger)
     finally:
         _quit(ftp)
 
@@ -323,7 +378,7 @@ class SyncManager:
                 if not job:
                     continue
                 try:
-                    run_sync(job, self.store.get_ps5(), run, self.logger)
+                    run_sync(job, self.store.get_ps5(), run, self.logger, self.store.get_romm())
                 except Cancelled:
                     run.state, run.message = "cancelled", "Cancelled"
                     self.logger.info("[%s] cancelled", job["name"])

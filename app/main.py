@@ -3,6 +3,7 @@ import os
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from . import romm
 from .config_store import ConfigStore
 from .presets import PRESETS, RETROARCH_SYSTEMS, remote_path_for
 from .sync_engine import LIBRARY_ROOT, SyncManager, resolve_source, test_connection
@@ -32,9 +33,13 @@ def create_app(store=None, start_manager=True):
         if target not in PRESETS:
             raise ValueError(f"Unknown target: {target}")
         resolve_source(values.get("source", ""))
+        collection = values.get("romm_collection_id") not in (None, "")
+        if collection:
+            values["remote_path"] = "/"  # each game goes to its own system's folder
+            values["mirror_deletes"] = False
         if not values.get("remote_path"):
             values["remote_path"] = remote_path_for(target, values.get("subfolder", ""))
-        if "extensions" not in body and existing is None:
+        if "extensions" not in body and existing is None and not collection:
             values["extensions"] = PRESETS[target]["extensions"]
         if not values.get("name"):
             values["name"] = f"{PRESETS[target]['label']}: {values.get('source') or '/'}"
@@ -68,6 +73,42 @@ def create_app(store=None, start_manager=True):
             return jsonify(test_connection(settings))
         except Exception as e:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(e) or e.__class__.__name__})
+
+    @app.get("/api/romm")
+    def get_romm():
+        return jsonify(store.get_romm())
+
+    @app.put("/api/romm")
+    def put_romm():
+        return jsonify(store.set_romm(request.get_json(force=True) or {}))
+
+    @app.post("/api/romm/test")
+    def test_romm():
+        settings = store.get_romm()
+        settings.update(request.get_json(silent=True) or {})
+        try:
+            return jsonify(romm.test_connection(settings))
+        except romm.RommError as e:
+            return jsonify({"ok": False, "error": str(e)})
+
+    @app.get("/api/romm/sources")
+    def romm_sources():
+        try:
+            client = romm.RommClient(store.get_romm())
+            platforms = client.platforms()
+            collections = client.collections()
+        except romm.RommError as e:
+            return bad_request(str(e), 502)
+        return jsonify({
+            "platforms": [{"id": p["id"], "name": p.get("display_name") or p.get("name") or p.get("slug"),
+                           "slug": p.get("slug"), "rom_count": p.get("rom_count"),
+                           "suggestion": romm.suggest_target(p.get("slug"))
+                           or romm.suggest_target(p.get("fs_slug"))}
+                          for p in platforms],
+            "collections": [{"id": c["id"], "name": c.get("name"),
+                             "rom_count": c.get("rom_count", len(c.get("rom_ids") or c.get("roms") or []))}
+                            for c in collections],
+        })
 
     @app.get("/api/browse")
     def browse():

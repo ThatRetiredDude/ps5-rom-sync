@@ -78,6 +78,11 @@
   .check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
   .check input { width: auto; }
   .foot { display: flex; justify-content: flex-end; gap: 8px; }
+  details.panel > summary { cursor: pointer; font-size: 15px; color: var(--muted); font-weight: 600;
+                            text-transform: uppercase; letter-spacing: .04em; }
+  details.panel[open] > summary { margin-bottom: 12px; }
+  .seg { display: flex; gap: 6px; }
+  .seg button.sel { border-color: var(--accent); background: rgba(59,130,246,.12); }
 </style>
 </head>
 <body>
@@ -100,6 +105,19 @@
     <div class="hint" id="ps5Hint">Start an FTP server on the PS5 first (ftpsrv uses port 2121, etaHEN's built-in FTP uses 1337).</div>
   </section>
 
+  <details class="panel" id="rommPanel">
+    <summary>RomM (optional)</summary>
+    <div class="row">
+      <div class="field"><label for="rommUrl">RomM address</label><input id="rommUrl" placeholder="http://tower:8080"></div>
+      <div class="field small"><label for="rommUser">User</label><input id="rommUser"></div>
+      <div class="field small"><label for="rommPassword">Password</label><input id="rommPassword" type="password"></div>
+      <div class="field small"><label for="rommToken">or API token</label><input id="rommToken" type="password"></div>
+      <button id="saveRomm" class="primary">Save</button>
+      <button id="testRomm">Test</button>
+    </div>
+    <div class="hint" id="rommHint">Pick games by RomM platform or collection. Mount RomM's library folder (the one RomM has at /romm/library) as this container's /roms.</div>
+  </details>
+
   <section>
     <div class="jobs" id="jobs"></div>
     <div style="margin-top:12px"><button class="add" id="addBtn" title="Add a library to sync">+</button></div>
@@ -115,12 +133,21 @@
 <dialog id="dlg">
   <form method="dialog" id="jobForm">
     <h3 id="dlgTitle">Add a library</h3>
-    <div>
+    <div id="fromField" style="display:none">
+      <label>Games from</label>
+      <div class="seg"><button type="button" data-from="folder">Library folder</button><button type="button" data-from="romm">RomM</button></div>
+    </div>
+    <div class="field" id="rommField" style="display:none">
+      <label for="rommSource">RomM platform or collection</label>
+      <select id="rommSource"></select>
+      <div class="hint" id="rommSourceHint"></div>
+    </div>
+    <div id="targetField">
       <label>Sync to</label>
       <div class="targets" id="targets"></div>
       <div class="hint" id="targetHelp"></div>
     </div>
-    <div class="field">
+    <div class="field" id="sourceField">
       <label for="source">Library folder (inside the container's library mount)</label>
       <div class="browse"><input id="source" placeholder="/ (whole library)"><button type="button" id="browseBtn">Browse</button></div>
       <div class="picker" id="picker"></div>
@@ -130,16 +157,16 @@
       <input id="subfolder" list="systems" placeholder="snes">
       <datalist id="systems"></datalist>
     </div>
-    <div class="field">
+    <div class="field" id="remoteField">
       <label for="remote">Folder on the PS5</label>
       <input id="remote">
     </div>
     <div class="row">
-      <div class="field"><label for="exts">Only these file types (blank = everything)</label><input id="exts" placeholder="zip, sfc, smc"></div>
+      <div class="field" id="extsField"><label for="exts">Only these file types (blank = everything)</label><input id="exts" placeholder="zip, sfc, smc"></div>
       <div class="field small"><label for="interval">Auto-sync (min)</label><input id="interval" type="number" min="0" placeholder="0 = off"></div>
     </div>
     <div class="field"><label for="name">Name</label><input id="name" placeholder="SNES to RetroArch"></div>
-    <label class="check"><input type="checkbox" id="mirror"> Delete files on the PS5 that are no longer in the library</label>
+    <label class="check" id="mirrorField"><input type="checkbox" id="mirror"> Delete files on the PS5 that are no longer in the library</label>
     <div class="foot">
       <button type="button" class="danger" id="deleteJob" style="margin-right:auto;display:none">Delete</button>
       <button type="button" id="cancelDlg">Cancel</button>
@@ -158,6 +185,9 @@ let editing = null;
 let target = "retroarch";
 let remoteTouched = false;
 let extsTouched = false;
+let from = "folder";
+let rommSources = null;
+let rommReady = false;
 
 async function api(method, url, body) {
   const res = await fetch(url, { method, headers: { "Content-Type": "application/json" },
@@ -201,6 +231,88 @@ async function testPs5() {
 }
 
 function hint(text, cls = "") { $("ps5Hint").textContent = text; $("ps5Hint").className = "hint " + cls; }
+
+async function loadRomm() {
+  const r = await api("GET", "/api/romm");
+  $("rommUrl").value = r.url; $("rommUser").value = r.user;
+  $("rommPassword").value = r.password; $("rommToken").value = r.token;
+  rommReady = !!r.url;
+}
+
+function rommForm() {
+  return { url: $("rommUrl").value, user: $("rommUser").value,
+           password: $("rommPassword").value, token: $("rommToken").value };
+}
+
+function rommHint(text, cls = "") { $("rommHint").textContent = text; $("rommHint").className = "hint " + cls; }
+
+$("saveRomm").onclick = async () => {
+  try {
+    await api("PUT", "/api/romm", rommForm());
+    rommReady = !!$("rommUrl").value.trim(); rommSources = null;
+    testRomm();
+  } catch (e) { rommHint(e.message, "err"); }
+};
+$("testRomm").onclick = () => testRomm();
+
+async function testRomm() {
+  rommHint("Connecting…");
+  const r = await api("POST", "/api/romm/test", rommForm());
+  rommHint(r.ok ? `Connected. Found ${r.platforms} platforms with games.` : r.error, r.ok ? "ok" : "err");
+}
+
+function selectedRomm() {
+  const [kind, id] = ($("rommSource").value || ":").split(":");
+  if (!rommSources || !id) return null;
+  const list = kind === "c" ? rommSources.collections : rommSources.platforms;
+  return { kind, item: list.find((x) => String(x.id) === id) };
+}
+
+async function setFrom(value) {
+  from = value;
+  document.querySelectorAll("[data-from]").forEach((b) => b.classList.toggle("sel", b.dataset.from === from));
+  $("sourceField").style.display = from === "folder" ? "" : "none";
+  $("rommField").style.display = from === "romm" ? "" : "none";
+  if (from === "romm" && !rommSources) {
+    $("rommSource").innerHTML = "<option>Loading…</option>";
+    try { rommSources = await api("GET", "/api/romm/sources"); }
+    catch (e) { $("rommSource").innerHTML = ""; $("formErr").textContent = e.message; return; }
+    const opt = (v, text) => `<option value="${v}">${esc(text)}</option>`;
+    $("rommSource").innerHTML = `<option value="">Choose…</option>
+      <optgroup label="Platforms">${rommSources.platforms.map((p) =>
+        opt("p:" + p.id, `${p.name} (${p.rom_count ?? "?"})${p.suggestion ? "" : " · no PS5 target"}`)).join("")}</optgroup>
+      <optgroup label="Collections">${rommSources.collections.map((c) =>
+        opt("c:" + c.id, `${c.name} (${c.rom_count})`)).join("")}</optgroup>`;
+  }
+  if (from === "romm" && editing && !$("rommSource").value) {
+    if (editing.romm_platform_id) $("rommSource").value = "p:" + editing.romm_platform_id;
+    if (editing.romm_collection_id) $("rommSource").value = "c:" + editing.romm_collection_id;
+  }
+  applyRomm();
+}
+document.querySelectorAll("[data-from]").forEach((b) => b.onclick = () => setFrom(b.dataset.from));
+
+function applyRomm() {
+  const collection = from === "romm" && selectedRomm()?.kind === "c";
+  $("targetField").style.display = collection ? "none" : "";
+  $("remoteField").style.display = collection ? "none" : "";
+  $("mirrorField").style.display = collection ? "none" : "";
+  $("extsField").style.display = collection ? "none" : "";
+  if (collection) $("subfolderField").style.display = "none"; else renderTargets();
+  $("rommSourceHint").textContent = collection
+    ? "Each game goes to RetroArch or Porpoise based on its system. Systems with no PS5 target are skipped." : "";
+}
+
+$("rommSource").onchange = () => {
+  const sel = selectedRomm();
+  if (sel?.kind === "p" && sel.item.suggestion) {
+    const s = sel.item.suggestion;
+    $("subfolder").value = s.subfolder; $("subfolder").dataset.touched = "1";
+    remoteTouched = false; extsTouched = false;
+    selectTarget(s.target);
+  }
+  applyRomm();
+};
 
 function renderTargets() {
   $("targets").innerHTML = Object.entries(meta.presets).map(([key, p]) =>
@@ -270,11 +382,14 @@ function openDialog(job) {
   $("name").value = job?.name || "";
   $("interval").value = job?.interval_minutes || "";
   $("mirror").checked = !!job?.mirror_deletes;
+  $("fromField").style.display = rommReady ? "" : "none";
   target = job?.target || (jobs.some((j) => j.target === "retroarch") ? "porpoise" : "retroarch");
   if (jobs.some((j) => j.target === "porpoise") && jobs.some((j) => j.target === "retroarch") && !job) target = "custom";
   renderTargets();
   $("exts").value = job ? job.extensions.join(", ") : (meta.presets[target].extensions || []).join(", ");
   if (job) $("remote").value = job.remote_path; else { remoteTouched = false; updateRemote(); }
+  $("rommSource").value = "";
+  setFrom(job && (job.romm_platform_id || job.romm_collection_id) ? "romm" : "folder");
   $("dlg").showModal();
 }
 
@@ -292,8 +407,17 @@ $("jobForm").onsubmit = async (ev) => {
     target, source: $("source").value.replace(/^\/+/, ""), subfolder: $("subfolder").value.trim(),
     remote_path: $("remote").value.trim(), extensions: $("exts").value,
     interval_minutes: Number($("interval").value || 0), mirror_deletes: $("mirror").checked,
-    name: $("name").value.trim(),
+    name: $("name").value.trim(), romm_platform_id: null, romm_collection_id: null,
   };
+  if (from === "romm") {
+    const sel = selectedRomm();
+    if (!sel) { $("formErr").textContent = "Choose a RomM platform or collection."; return; }
+    body.source = "";
+    body[sel.kind === "c" ? "romm_collection_id" : "romm_platform_id"] = sel.item.id;
+    if (sel.kind === "c") body.extensions = [];  // each game uses its own target's file types
+    if (!body.name) body.name = sel.kind === "c"
+      ? `${sel.item.name} → PS5` : `${sel.item.name} → ${meta.presets[target].label.replace(/ \(.*\)/, "")}`;
+  }
   if (!body.name) {
     const label = meta.presets[target].label.replace(/ \(.*\)/, "");
     body.name = `${body.subfolder || body.source.split("/").pop() || "Library"} → ${label}`;
@@ -323,7 +447,8 @@ function renderJobs() {
     return `<div class="job">
       <div class="job-top">
         <div class="job-title"><b>${esc(j.name)}</b>
-          <span>/${esc(j.source)} → ${esc(j.remote_path)}${j.interval_minutes ? ` · every ${j.interval_minutes} min` : ""}</span></div>
+          <span>${j.romm_collection_id ? "RomM collection → each system's folder"
+                 : `${j.romm_platform_id ? "RomM platform" : "/" + esc(j.source)} → ${esc(j.remote_path)}`}${j.interval_minutes ? ` · every ${j.interval_minutes} min` : ""}</span></div>
         <span class="badge ${state}">${state}</span>
         <div class="actions">
           ${busy ? `<button data-a="cancel" data-id="${j.id}">Stop</button>`
@@ -363,6 +488,7 @@ async function poll() {
   meta = await api("GET", "/api/meta");
   $("systems").innerHTML = meta.retroarch_systems.map((s) => `<option value="${s}">`).join("");
   await loadPs5();
+  await loadRomm();
   await loadJobs();
   if ($("host").value) testPs5();
   poll();
