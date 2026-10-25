@@ -300,3 +300,48 @@ def test_gives_up_after_the_last_retry(tmp_path, library, no_backoff):
             run_sync(job(), ps5, JobRun("x"))
     finally:
         server.close_all()
+
+
+def test_empty_source_folder_warns_instead_of_reporting_success(library, tmp_path, caplog):
+    (library / "empty").mkdir()
+    ps5 = {"host": "127.0.0.1", "port": 1}  # never contacted: there is nothing to sync
+    run = JobRun("x")
+    with caplog.at_level("WARNING", logger="romsync"):
+        run_sync(job(source="empty"), ps5, run)
+    assert run.state == "warning"
+    assert "No files found in /empty" in run.message and "Nothing was uploaded or deleted" in run.message
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_empty_library_never_triggers_mirror_deletes(ftp_server, tmp_path, monkeypatch):
+    # A NAS that is unplugged leaves an empty mount point. Mirroring that to the PS5
+    # would delete every game, so the sync must stop before touching the PS5.
+    lib = tmp_path / "unmounted"
+    (lib / "gamecube").mkdir(parents=True)
+    monkeypatch.setattr(sync_engine, "LIBRARY_ROOT", str(lib))
+    dest = ftp_server["root"] / "data/porpoise/games"
+    dest.mkdir(parents=True)
+    (dest / "Precious.iso").write_bytes(b"x" * 10)
+    run = JobRun("x")
+    run_sync(job(source="gamecube", remote_path="/data/porpoise/games", extensions=["iso"],
+                 mirror_deletes=True), ftp_server, run)
+    assert run.state == "warning" and run.files_deleted == 0
+    assert (dest / "Precious.iso").exists()
+
+
+def test_missing_source_on_unmounted_library_explains_why(tmp_path, monkeypatch):
+    lib = tmp_path / "mountpoint"
+    lib.mkdir()  # what Docker leaves behind when the NAS is not mounted
+    monkeypatch.setattr(sync_engine, "LIBRARY_ROOT", str(lib))
+    with pytest.raises(FileNotFoundError, match="empty or not mounted"):
+        run_sync(job(source="snes"), {"host": "127.0.0.1", "port": 1}, JobRun("x"))
+
+
+def test_meta_reports_empty_library(tmp_path, monkeypatch):
+    lib = tmp_path / "mountpoint"
+    lib.mkdir()
+    monkeypatch.setattr(sync_engine, "LIBRARY_ROOT", str(lib))
+    c = create_app(ConfigStore(str(tmp_path / "c" / "config.json")), start_manager=False).test_client()
+    assert c.get("/api/meta").get_json()["library_empty"] is True
+    (lib / "snes").mkdir()
+    assert c.get("/api/meta").get_json()["library_empty"] is False

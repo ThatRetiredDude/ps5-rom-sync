@@ -156,7 +156,7 @@ Hit **Sync now** on a card, or **Sync all** at the top. The progress bar and the
 |---|---|
 | **Only these file types** | Comma-separated extensions, like `sfc, smc, zip`. Blank copies everything. |
 | **Auto-sync (min)** | Re-sync every N minutes. `0` turns it off. |
-| **Delete files on the PS5…** | Removes files from the PS5 folder that aren't in your library anymore. Only touches files of the chosen types, only inside that sync's folder. Off by default. |
+| **Delete files on the PS5…** | Removes files from the PS5 folder that aren't in your library anymore. Only touches files of the chosen types, only inside that sync's folder. Off by default. If the library folder is empty or missing (say the NAS is unplugged), the sync stops with a warning and deletes nothing. |
 
 ## 🔧 Environment variables
 
@@ -205,7 +205,7 @@ Use a wired connection on the PS5 if you can. Syncs run one at a time on purpose
 <details>
 <summary><b>My library folder is empty in Browse</b></summary>
 
-The `/roms` volume isn't mounted, or it points somewhere else. Check the `volumes:` line in your compose file.
+The `/roms` volume isn't mounted, or it points somewhere else. Check the `volumes:` line in your compose file. If the drive or NAS holding your ROMs is unplugged, Docker mounts an empty folder instead: ROM Sync shows a warning banner, marks the sync **warning** (instead of "done") and never deletes anything on the PS5 in that case.
 </details>
 
 ## 🧑‍💻 Development

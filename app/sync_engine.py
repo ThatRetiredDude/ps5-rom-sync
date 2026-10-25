@@ -27,6 +27,14 @@ def resolve_source(source):
     return path
 
 
+def library_is_empty():
+    """True when the library mount is missing or has nothing in it (e.g. NAS unplugged)."""
+    try:
+        return not any(True for _ in os.scandir(LIBRARY_ROOT))
+    except OSError:
+        return True
+
+
 # Seconds to wait before each retry after the FTP connection drops. The PS5 FTP payload
 # serves one client at a time and falls over easily, so a short, patient backoff helps.
 RETRY_DELAYS = (2, 5, 10)
@@ -227,7 +235,9 @@ def run_sync(job, ps5, run: JobRun, logger=log):
     run.started_at = time.time()
     src = resolve_source(job["source"])
     if not os.path.isdir(src):
-        raise FileNotFoundError(f"Source folder not found: {job['source'] or '/'}")
+        hint = (f" The library folder {LIBRARY_ROOT} is empty or not mounted: is the drive or NAS plugged in?"
+                if library_is_empty() else "")
+        raise FileNotFoundError(f"Source folder not found: {job['source'] or '/'}.{hint}")
     remote_root = job["remote_path"].rstrip("/") or "/"
 
     files = list(walk_local(src, job["extensions"]))
@@ -235,6 +245,19 @@ def run_sync(job, ps5, run: JobRun, logger=log):
     run.bytes_total = sum(size for _, _, size in files)
     logger.info("[%s] %d local files (%.1f MB) -> %s", job["name"], len(files),
                 run.bytes_total / 1e6, remote_root)
+    if not files:
+        # Nothing to do, and certainly nothing to delete: an empty folder usually means the
+        # drive or NAS holding the library is not mounted, not that the library was emptied.
+        where = f"/{job['source']}" if job["source"] else "the library"
+        why = (f"The library folder {LIBRARY_ROOT} is empty or not mounted: is the drive or NAS plugged in?"
+               if library_is_empty() else
+               "Check the folder, and the file types filter" + (f" ({', '.join(job['extensions'])})"
+                                                              if job["extensions"] else "") + ".")
+        run.state = "warning"
+        run.message = f"No files found in {where}. Nothing was uploaded or deleted. {why}"
+        run.finished_at = time.time()
+        logger.warning("[%s] %s", job["name"], run.message)
+        return
 
     tree = RemoteTree(connect_with_retry(ps5, run, logger), logger)
 

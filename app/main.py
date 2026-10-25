@@ -5,7 +5,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from .config_store import ConfigStore
 from .presets import PRESETS, RETROARCH_SYSTEMS, remote_path_for
-from .sync_engine import LIBRARY_ROOT, SyncManager, resolve_source, test_connection
+from .sync_engine import LIBRARY_ROOT, SyncManager, library_is_empty, resolve_source, test_connection
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -47,7 +47,8 @@ def create_app(store=None, start_manager=True):
     @app.get("/api/meta")
     def meta():
         return jsonify({"presets": PRESETS, "retroarch_systems": RETROARCH_SYSTEMS,
-                        "library_root": LIBRARY_ROOT})
+                        "library_root": LIBRARY_ROOT,
+                        "library_empty": library_is_empty()})
 
     @app.get("/api/ps5")
     def get_ps5():
@@ -139,6 +140,9 @@ def main():
     from waitress import serve
 
     port = int(os.environ.get("WEB_PORT", "8585"))
+    if library_is_empty():
+        logging.warning("The library folder %s is empty or not mounted. Syncs will do nothing "
+                        "until your ROMs are available.", LIBRARY_ROOT)
     logging.info("PS5 ROM Sync listening on :%d (library: %s)", port, LIBRARY_ROOT)
     serve(create_app(), host="0.0.0.0", port=port, threads=8)
 
