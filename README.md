@@ -32,6 +32,8 @@ A tiny Docker container that copies your retro game library to a jailbroken PS5 
 - 🛡️ **No half-copied ROMs.** Each file uploads as `name.part` and is renamed when it finishes.
 - ⏰ **Auto-sync on a timer**, if you want it.
 - 🧹 **Optional cleanup** of games you've removed from your library.
+- 📚 **Works with RomM.** Pick games by RomM platform or collection instead of by folder.
+- 🟧 **Unraid template** included.
 - 📱 **Works from your phone.** It's just a web page.
 
 ## 📂 Where your games end up
@@ -115,7 +117,19 @@ Then use `image: ps5-rom-sync` in the compose file.
 </details>
 
 <details>
-<summary>🟧 Unraid / Synology / TrueNAS</summary>
+<summary>🟧 Unraid</summary>
+
+Until it's listed in Community Apps, add it from the template:
+
+1. Go to **Docker → Add Container**.
+2. Paste this into **Template** and press Enter (or into the template repositories box under **Docker → Template Repositories** to keep it around):
+   `https://raw.githubusercontent.com/ThatRetiredDude/ps5-rom-sync/main/unraid/ps5-rom-sync.xml`
+3. Set **ROMs** to your ROM share. Using RomM? Point it at RomM's library folder instead (see [RomM](#-romm) below).
+4. Hit **Apply**.
+</details>
+
+<details>
+<summary>🗄️ Synology / TrueNAS</summary>
 
 Add a container from `ghcr.io/thatretireddude/ps5-rom-sync:latest` with:
 - Port `8585` → `8585`
@@ -152,6 +166,20 @@ Hit **Sync now** on a card, or **Sync all** at the top. The progress bar and the
 
 ---
 
+## 📚 RomM
+
+Already keeping your games in [RomM](https://github.com/rommapp/romm)? Let it decide what gets copied.
+
+1. Mount **the same folder RomM uses as its library** (the one mapped to `/romm/library` in RomM's container) as `/roms` here. Read-only is fine.
+2. Open the **RomM** panel on the web page, enter RomM's address (like `http://tower:8080`) and your RomM user and password, or an API token. Hit **Save**.
+3. Hit **➕**, choose **Games from: RomM**, and pick:
+   - **A platform**, like *Super Nintendo*. The PS5 target and RetroArch folder are filled in for you, and only games RomM knows about are copied.
+   - **A collection**, like *Favorites*. Each game goes to RetroArch or Porpoise based on its system. Systems with no PS5 emulator are skipped and noted in the activity log.
+
+RomM is only asked *which* files to copy; the files themselves are read from the `/roms` mount, so nothing is downloaded through RomM.
+
+---
+
 ## ⚙️ Options per sync
 
 | Option | What it does |
@@ -159,7 +187,7 @@ Hit **Sync now** on a card, or **Sync all** at the top. The progress bar and the
 | **Only these file types** | Comma-separated extensions, like `sfc, smc, zip`. Blank copies everything. |
 | **Auto-sync (min)** | Re-sync every N minutes. `0` turns it off. |
 | **Put each game in its own folder** | Porpoise only, off by default. Copies `Mario Kart.rvz` to `Mario Kart/Mario Kart.rvz`, for setups that keep one folder per game. Turn it off if your games are loose files. Combined with *Delete files on the PS5…*, loose copies from before are removed. |
-| **Delete files on the PS5…** | Removes files from the PS5 folder that aren't in your library anymore. Only touches files of the chosen types, only inside that sync's folder. Off by default. If the library folder is empty or missing (say the NAS is unplugged), the sync stops with a warning and deletes nothing. |
+| **Delete files on the PS5…** | Removes files from the PS5 folder that aren't in your library anymore. Only touches files of the chosen types, only inside that sync's folder. Off by default. If the library folder is empty or missing (say the NAS is unplugged), the sync stops with a warning and deletes nothing. Not available for RomM collections, since they spread across several folders. |
 
 ## 🔧 Environment variables
 
@@ -170,6 +198,9 @@ Hit **Sync now** on a card, or **Sync all** at the top. The progress bar and the
 | `PS5_FTP_PORT` | `2121` | Pre-fills the FTP port |
 | `LIBRARY_ROOT` | `/roms` | Where the library is mounted inside the container |
 | `CONFIG_DIR` | `/config` | Where `config.json` is saved |
+| `ROMM_URL` | blank | Pre-fills the RomM address |
+| `ROMM_USER` / `ROMM_PASSWORD` | blank | Pre-fills the RomM login |
+| `ROMM_TOKEN` | blank | Pre-fills a RomM API token (used instead of user and password) |
 | `PORPOISE_GAMES_DIR` | `/data/porpoise/games` | Porpoise's games folder on your PS5. Many setups differ, e.g. `/data/homebrew/PPSA99764/porpoise/games`. Sets the default for new Porpoise syncs. |
 | `PORPOISE_COVERS_DIR` | `/data/porpoise/covers` | Same, for cover art |
 | `RETROARCH_DIR` | `/data/homebrew/PPSA99169` | RetroArch's folder on the PS5 (the one holding `content/`, `system/` and `config/`) |
@@ -210,6 +241,12 @@ Check the file type. Porpoise reads `iso gcm rvz ciso gcz wbfs wia`. Zipped or 7
 <summary><b>Syncing is slow</b></summary>
 
 Use a wired connection on the PS5 if you can. Syncs run one at a time on purpose, because PS5 FTP servers get unhappy with several uploads at once.
+</details>
+
+<details>
+<summary><b>"None of RomM's files were found"</b></summary>
+
+RomM answered, but the files it listed aren't under `/roms`. Mount RomM's library folder itself (the parent of its `roms` folder) as `/roms`, not a single system folder.
 </details>
 
 <details>
