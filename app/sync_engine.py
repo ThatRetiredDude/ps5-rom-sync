@@ -49,6 +49,12 @@ class PS5Unreachable(ConnectionError):
     pass
 
 
+# When the PS5 can't be reached (payload not running, or another FTP client has the one
+# connection), a sync waits and tries again this often, for up to PS5_BUSY_RETRY_MINUTES.
+RETRY_LATER_SECONDS = 60
+BUSY_RETRY_MINUTES = int(os.environ.get("PS5_BUSY_RETRY_MINUTES", "30"))
+
+
 def connect(ps5, timeout=15):
     if not ps5.get("host"):
         raise ValueError("Set your PS5 IP address first")
@@ -241,6 +247,8 @@ class JobRun:
         self.files_deleted = 0
         self.bytes_total = 0
         self.bytes_done = 0
+        self.busy_since = None  # first time this sync found the PS5 busy or unreachable
+        self.retry_at = None
         self.started_at = None
         self.finished_at = None
         self.cancel_event = threading.Event()
@@ -486,12 +494,13 @@ class SyncManager:
         threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._scheduler, daemon=True).start()
 
-    def enqueue(self, job_id):
+    def enqueue(self, job_id, busy_since=None):
         with self.lock:
             current = self.runs.get(job_id)
             if current and current.state in ("queued", "running"):
                 return current
             run = JobRun(job_id)
+            run.busy_since = busy_since
             self.runs[job_id] = run
             self.queue.append(job_id)
             self.last_started[job_id] = time.time()
@@ -503,8 +512,9 @@ class SyncManager:
             run = self.runs.get(job_id)
             if not run:
                 return False
-            if run.state == "queued":
-                self.queue.remove(job_id)
+            if run.state in ("queued", "waiting"):
+                if run.state == "queued":
+                    self.queue.remove(job_id)
                 run.state = "cancelled"
                 run.message = "Cancelled"
             run.cancel_event.set()
@@ -524,24 +534,52 @@ class SyncManager:
                         break
                     job_id = self.queue.popleft()
                     run = self.runs[job_id]
-                job = self.store.get_job(job_id)
-                if not job:
-                    continue
-                try:
-                    run_sync(job, self.store.get_ps5(), run, self.logger, self.store.get_romm())
-                except Cancelled:
-                    run.state, run.message = "cancelled", "Cancelled"
-                    self.logger.info("[%s] cancelled", job["name"])
-                except Exception as e:  # noqa: BLE001 - surface any failure in the UI
-                    run.state, run.message = "error", str(e) or e.__class__.__name__
-                    self.logger.error("[%s] failed: %s", job["name"], run.message)
-                finally:
-                    run.current_file = ""
-                    run.finished_at = time.time()
+                self._run_one(job_id, run)
+
+    def _run_one(self, job_id, run):
+        job = self.store.get_job(job_id)
+        if not job:
+            return
+        try:
+            run_sync(job, self.store.get_ps5(), run, self.logger, self.store.get_romm())
+        except Cancelled:
+            run.state, run.message = "cancelled", "Cancelled"
+            self.logger.info("[%s] cancelled", job["name"])
+        except PS5Unreachable as e:
+            self._retry_later(job, run, e)
+        except Exception as e:  # noqa: BLE001 - surface any failure in the UI
+            run.state, run.message = "error", str(e) or e.__class__.__name__
+            self.logger.error("[%s] failed: %s", job["name"], run.message)
+        finally:
+            run.current_file = ""
+            run.finished_at = time.time()
+
+    def _retry_later(self, job, run, error):
+        now = time.time()
+        run.busy_since = run.busy_since or run.started_at or now
+        give_up_at = run.busy_since + BUSY_RETRY_MINUTES * 60
+        if now + RETRY_LATER_SECONDS > give_up_at:
+            run.state = "error"
+            run.message = f"{error} Gave up after trying for {BUSY_RETRY_MINUTES} minutes."
+            self.logger.error("[%s] failed: %s", job["name"], run.message)
+            return
+        run.state, run.retry_at = "waiting", now + RETRY_LATER_SECONDS
+        run.message = ("The PS5 is busy or not reachable. Trying again every minute until "
+                       + time.strftime("%H:%M", time.localtime(give_up_at)) + ".")
+        self.logger.warning("[%s] PS5 busy or unreachable; will try again in %ds",
+                            job["name"], RETRY_LATER_SECONDS)
+
+    def _retry_waiting(self, now):
+        with self.lock:
+            due = [(jid, r.busy_since) for jid, r in self.runs.items()
+                   if r.state == "waiting" and r.retry_at <= now]
+        for job_id, busy_since in due:
+            self.enqueue(job_id, busy_since)
 
     def _scheduler(self):
         while True:
             now = time.time()
+            self._retry_waiting(now)
             for job in self.store.list_jobs():
                 minutes = job.get("interval_minutes") or 0
                 if not job.get("enabled", True) or minutes <= 0:
@@ -551,7 +589,7 @@ class SyncManager:
                     self.last_started[job["id"]] = now  # first run one interval after startup
                 elif now - last >= minutes * 60:
                     self.enqueue(job["id"])
-            time.sleep(30)
+            time.sleep(15)
 
 
 class _DequeHandler(logging.Handler):

@@ -2,6 +2,7 @@ import base64
 import os
 import socket
 import threading
+import time
 
 import pytest
 from pyftpdlib.authorizers import DummyAuthorizer
@@ -545,3 +546,51 @@ def test_changed_file_on_ftpsrv_like_server(ftpsrv_server, library):
     run_sync(job(), ftpsrv_server, run)
     dest = ftpsrv_server["root"] / "data/homebrew/PPSA99169/content/snes"
     assert run.files_uploaded == 1 and (dest / "Chrono Trigger.sfc").read_bytes() == b"q" * 123
+
+
+def test_busy_ps5_waits_and_retries_later(ftp_server, library, tmp_path, monkeypatch):
+    monkeypatch.setattr(sync_engine, "RETRY_DELAYS", ())
+    store = ConfigStore(str(tmp_path / "config" / "config.json"))
+    with socket.socket() as s:  # a port with nothing listening: the PS5 looks busy/off
+        s.bind(("127.0.0.1", 0))
+        dead_port = s.getsockname()[1]
+    store.set_ps5({"host": "127.0.0.1", "port": dead_port})
+    saved = store.add_job(job(source="snes"))
+    manager = sync_engine.SyncManager(store)
+
+    first = manager.enqueue(saved["id"])
+    manager.queue.popleft()
+    manager._run_one(saved["id"], first)
+    assert first.state == "waiting" and first.retry_at > time.time()
+    manager._retry_waiting(time.time())
+    assert manager.runs[saved["id"]] is first  # not due yet
+
+    store.set_ps5({"port": ftp_server["port"]})  # the other FTP client let go
+    manager._retry_waiting(first.retry_at)
+    second = manager.runs[saved["id"]]
+    assert second is not first and second.busy_since == first.busy_since
+    manager.queue.popleft()
+    manager._run_one(saved["id"], second)
+    assert second.state == "done" and second.files_uploaded == 2
+
+
+def test_busy_ps5_gives_up_and_cancel_stops_waiting(library, tmp_path, monkeypatch):
+    monkeypatch.setattr(sync_engine, "RETRY_DELAYS", ())
+    store = ConfigStore(str(tmp_path / "config" / "config.json"))
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        store.set_ps5({"host": "127.0.0.1", "port": s.getsockname()[1]})
+    saved = store.add_job(job(source="snes"))
+    manager = sync_engine.SyncManager(store)
+
+    run = manager.enqueue(saved["id"])
+    manager.queue.popleft()
+    manager._run_one(saved["id"], run)
+    assert manager.cancel(saved["id"]) and run.state == "cancelled"
+    manager._retry_waiting(time.time() + 3600)
+    assert manager.runs[saved["id"]] is run  # a cancelled sync is not retried
+
+    late = manager.enqueue(saved["id"], busy_since=time.time() - 31 * 60)
+    manager.queue.popleft()
+    manager._run_one(saved["id"], late)
+    assert late.state == "error" and "Gave up after trying for 30 minutes" in late.message
