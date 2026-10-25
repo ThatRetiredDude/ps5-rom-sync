@@ -60,6 +60,10 @@ class ConfigStore:
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(self.data, f, indent=2)
+            try:
+                os.chmod(tmp, 0o600)  # it may hold the PS5 FTP password
+            except OSError:
+                pass
             os.replace(tmp, self.path)
 
     def get_ps5(self):

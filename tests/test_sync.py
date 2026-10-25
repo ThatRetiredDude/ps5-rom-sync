@@ -1,3 +1,4 @@
+import base64
 import os
 import socket
 import threading
@@ -345,3 +346,51 @@ def test_meta_reports_empty_library(tmp_path, monkeypatch):
     assert c.get("/api/meta").get_json()["library_empty"] is True
     (lib / "snes").mkdir()
     assert c.get("/api/meta").get_json()["library_empty"] is False
+
+
+def _client(tmp_path, **kw):
+    store = ConfigStore(str(tmp_path / "config" / "config.json"))
+    return create_app(store, start_manager=False, **kw).test_client(), store
+
+
+def test_ps5_password_is_never_returned(tmp_path):
+    c, store = _client(tmp_path)
+    r = c.put("/api/ps5", json={"host": "10.0.0.5", "user": "me", "password": "hunter2"})
+    assert r.get_json()["password"] == "" and r.get_json()["has_password"] is True
+    assert store.get_ps5()["password"] == "hunter2"
+    body = c.get("/api/ps5").get_data(as_text=True)
+    assert "hunter2" not in body
+    # Saving other fields without a password key keeps it; an explicit "" clears it.
+    c.put("/api/ps5", json={"host": "10.0.0.6"})
+    assert store.get_ps5()["password"] == "hunter2"
+    c.put("/api/ps5", json={"password": ""})
+    assert store.get_ps5()["password"] == "" and c.get("/api/ps5").get_json()["has_password"] is False
+
+
+def test_ui_is_open_without_a_password(tmp_path):
+    c, _ = _client(tmp_path, ui_password="")
+    assert c.get("/api/meta").status_code == 200
+
+
+def test_ui_password_protects_everything_but_healthz(tmp_path):
+    c, _ = _client(tmp_path, ui_password="s3cret")
+    r = c.get("/api/meta")
+    assert r.status_code == 401 and "Basic" in r.headers["WWW-Authenticate"]
+    assert c.get("/").status_code == 401 and c.put("/api/ps5", json={}).status_code == 401
+    assert c.get("/healthz").status_code == 200
+
+    def basic(user, pw):
+        return {"Authorization": "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()}
+
+    assert c.get("/api/meta", headers=basic("admin", "wrong")).status_code == 401
+    assert c.get("/api/meta", headers=basic("root", "s3cret")).status_code == 401
+    assert c.get("/api/meta", headers=basic("admin", "s3cret")).status_code == 200
+
+
+def test_ui_password_and_user_come_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("UI_PASSWORD", "pw")
+    monkeypatch.setenv("UI_USER", "jared")
+    c, _ = _client(tmp_path)
+    token = base64.b64encode(b"jared:pw").decode()
+    assert c.get("/api/meta").status_code == 401
+    assert c.get("/api/meta", headers={"Authorization": f"Basic {token}"}).status_code == 200

@@ -167,6 +167,10 @@ Hit **Sync now** on a card, or **Sync all** at the top. The progress bar and the
 | `PS5_FTP_PORT` | `2121` | Pre-fills the FTP port |
 | `LIBRARY_ROOT` | `/roms` | Where the library is mounted inside the container |
 | `CONFIG_DIR` | `/config` | Where `config.json` is saved |
+| `UI_PASSWORD` | blank | Set it to ask for a login (HTTP basic auth) before the web page and API work. Blank means no login. |
+| `UI_USER` | `admin` | User name for that login |
+
+> 🔒 The web page can change your PS5's FTP settings and copy files, so with no `UI_PASSWORD` anyone on your network can use it. Set one if the network isn't just you. The FTP password you save is never sent back to the browser.
 
 ## 🩺 Troubleshooting
 

@@ -1,7 +1,8 @@
+import hmac
 import logging
 import os
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from .config_store import ConfigStore
 from .presets import PRESETS, RETROARCH_SYSTEMS, remote_path_for
@@ -12,7 +13,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 
-def create_app(store=None, start_manager=True):
+def _same(a, b):
+    return hmac.compare_digest(str(a).encode(), str(b).encode())
+
+
+def create_app(store=None, start_manager=True, ui_password=None, ui_user=None):
+    """ui_password / ui_user default to the UI_PASSWORD / UI_USER environment variables.
+
+    With no password set the web UI is open, as before. With one set, every route except
+    /healthz needs HTTP basic auth.
+    """
+    ui_password = os.environ.get("UI_PASSWORD", "") if ui_password is None else ui_password
+    ui_user = ui_user or os.environ.get("UI_USER", "admin")
     app = Flask(__name__, static_folder=None)
     app.json.sort_keys = False  # keep presets in display order
     store = store or ConfigStore()
@@ -21,6 +33,26 @@ def create_app(store=None, start_manager=True):
         manager.start()
     app.config["store"] = store
     app.config["manager"] = manager
+
+    @app.get("/healthz")
+    def healthz():
+        return "ok"
+
+    @app.before_request
+    def require_login():
+        if not ui_password or request.path == "/healthz":
+            return None
+        auth = request.authorization
+        if auth and _same(auth.username or "", ui_user) and _same(auth.password or "", ui_password):
+            return None
+        return Response("Login required", 401, {"WWW-Authenticate": 'Basic realm="PS5 ROM Sync"'})
+
+    def public_ps5(settings):
+        """Never send the stored FTP password back to the browser."""
+        settings = dict(settings)
+        settings["has_password"] = bool(settings.get("password"))
+        settings["password"] = ""
+        return settings
 
     def bad_request(message, code=400):
         return jsonify({"error": message}), code
@@ -52,19 +84,21 @@ def create_app(store=None, start_manager=True):
 
     @app.get("/api/ps5")
     def get_ps5():
-        return jsonify(store.get_ps5())
+        return jsonify(public_ps5(store.get_ps5()))
 
     @app.put("/api/ps5")
     def put_ps5():
         try:
-            return jsonify(store.set_ps5(request.get_json(force=True) or {}))
+            # A missing "password" key keeps the saved one; "" clears it.
+            return jsonify(public_ps5(store.set_ps5(request.get_json(force=True) or {})))
         except (TypeError, ValueError) as e:
             return bad_request(str(e))
 
     @app.post("/api/ps5/test")
     def test_ps5():
         settings = store.get_ps5()
-        settings.update(request.get_json(silent=True) or {})
+        settings.update({k: v for k, v in (request.get_json(silent=True) or {}).items()
+                         if k != "password" or v})
         try:
             return jsonify(test_connection(settings))
         except Exception as e:  # noqa: BLE001
@@ -140,6 +174,9 @@ def main():
     from waitress import serve
 
     port = int(os.environ.get("WEB_PORT", "8585"))
+    if not os.environ.get("UI_PASSWORD"):
+        logging.warning("The web UI has no password: anyone on your network can use it. "
+                        "Set UI_PASSWORD to require a login.")
     if library_is_empty():
         logging.warning("The library folder %s is empty or not mounted. Syncs will do nothing "
                         "until your ROMs are available.", LIBRARY_ROOT)

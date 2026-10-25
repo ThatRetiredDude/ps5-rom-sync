@@ -186,15 +186,22 @@ function fmtBytes(n) {
 
 async function loadPs5() {
   const p = await api("GET", "/api/ps5");
-  $("host").value = p.host; $("port").value = p.port; $("user").value = p.user; $("password").value = p.password;
+  $("host").value = p.host; $("port").value = p.port; $("user").value = p.user;
+  // The saved password is never sent to the browser; leave the box alone to keep it.
+  $("password").value = ""; $("password").placeholder = p.has_password ? "(saved)" : "";
+  delete $("password").dataset.dirty;
 }
 
 function ps5Form() {
-  return { host: $("host").value, port: $("port").value || 2121, user: $("user").value, password: $("password").value };
+  const form = { host: $("host").value, port: $("port").value || 2121, user: $("user").value };
+  if ($("password").dataset.dirty) form.password = $("password").value;  // blank + edited = clear it
+  return form;
 }
 
+$("password").addEventListener("input", () => $("password").dataset.dirty = "1");
+
 $("savePs5").onclick = async () => {
-  try { await api("PUT", "/api/ps5", ps5Form()); hint("Saved.", "ok"); testPs5(); }
+  try { await api("PUT", "/api/ps5", ps5Form()); hint("Saved.", "ok"); await loadPs5(); testPs5(); }
   catch (e) { hint(e.message, "err"); }
 };
 $("testPs5").onclick = () => testPs5();
