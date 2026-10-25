@@ -50,7 +50,7 @@
   .badge.running { color: var(--accent); border-color: var(--accent); }
   .badge.done { color: var(--ok); border-color: var(--ok); }
   .badge.error { color: var(--err); border-color: var(--err); }
-  .badge.warning { color: var(--warn); border-color: var(--warn); }
+  .badge.warning, .badge.waiting { color: var(--warn); border-color: var(--warn); }
   .job-status.warning { color: var(--warn); }
   .banner { background: rgba(245,158,11,.12); border: 1px solid var(--warn); color: var(--warn);
             border-radius: var(--radius); padding: 10px 14px; margin-bottom: 16px; }
@@ -476,7 +476,7 @@ function renderJobs() {
       else if (state === "queued") status = "Waiting for another sync to finish…";
       else status = `${r.message}${r.finished_at ? " · " + new Date(r.finished_at * 1000).toLocaleString() : ""}`;
     }
-    const busy = state === "running" || state === "queued";
+    const busy = state === "running" || state === "queued" || state === "waiting";
     return `<div class="job">
       <div class="job-top">
         <div class="job-title"><b>${esc(j.name)}</b>

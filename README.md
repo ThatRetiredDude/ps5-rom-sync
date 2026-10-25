@@ -196,6 +196,7 @@ RomM is only asked *which* files to copy; the files themselves are read from the
 | `WEB_PORT` | `8585` | Port for the web page |
 | `PS5_HOST` | blank | Pre-fills the PS5 IP |
 | `PS5_FTP_PORT` | `2121` | Pre-fills the FTP port |
+| `PS5_BUSY_RETRY_MINUTES` | `30` | How long a sync keeps waiting (trying once a minute) when the PS5 is busy or unreachable, before it gives up |
 | `LIBRARY_ROOT` | `/roms` | Where the library is mounted inside the container |
 | `CONFIG_DIR` | `/config` | Where `config.json` is saved |
 | `ROMM_URL` | blank | Pre-fills the RomM address |
@@ -217,6 +218,12 @@ RomM is only asked *which* files to copy; the files themselves are read from the
 - Make sure the FTP payload is actually running. It stops when the PS5 goes into rest mode or reboots.
 - Double-check the port: `2121` for ftpsrv, `1337` for etaHEN.
 - The server running Docker has to be on the same network as the PS5.
+</details>
+
+<details>
+<summary><b>A sync says "The PS5 is busy or not reachable"</b></summary>
+
+The PS5's FTP payload may only take one connection at a time, so another FTP client (FileZilla, another sync tool) can block it, as can rest mode. The sync waits and tries again every minute for up to 30 minutes (`PS5_BUSY_RETRY_MINUTES`), then gives up. Hit **Stop** to stop waiting, or **Sync now** to try right away. It never disconnects anyone else.
 </details>
 
 <details>
