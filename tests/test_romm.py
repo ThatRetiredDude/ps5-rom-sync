@@ -160,6 +160,10 @@ def test_romm_api(romm_server, romm_library, tmp_path):
     assert c.get("/api/romm/sources").status_code == 502  # not set up yet
     c.put("/api/romm", json={k: romm_server[k] for k in ("url", "user", "password")})
     assert c.post("/api/romm/test").get_json() == {"ok": True, "platforms": 3}
+    saved = c.get("/api/romm").get_json()
+    assert saved["password"] == "" and saved["has_password"] is True  # never sent back
+    c.put("/api/romm", json={"url": romm_server["url"]})  # no password key: keep it
+    assert c.post("/api/romm/test", json={"password": ""}).get_json()["ok"]
 
     sources = c.get("/api/romm/sources").get_json()
     snes = sources["platforms"][0]

@@ -30,15 +30,65 @@ def resolve_source(source):
     return path
 
 
+def library_is_empty():
+    """True when the library mount is missing or has nothing in it (e.g. NAS unplugged)."""
+    try:
+        return not any(True for _ in os.scandir(LIBRARY_ROOT))
+    except OSError:
+        return True
+
+
+# Seconds to wait before each retry after the FTP connection drops. The PS5 FTP payload
+# serves one client at a time and falls over easily, so a short, patient backoff helps.
+RETRY_DELAYS = (2, 5, 10)
+# Errors that mean "the connection is gone or the server is busy", worth reconnecting for.
+CONNECTION_ERRORS = (OSError, EOFError, ftplib.error_temp, ftplib.error_reply)
+
+
+class PS5Unreachable(ConnectionError):
+    pass
+
+
 def connect(ps5, timeout=15):
     if not ps5.get("host"):
         raise ValueError("Set your PS5 IP address first")
+    host, port = ps5["host"], int(ps5.get("port") or 2121)
     ftp = ftplib.FTP(timeout=timeout)
-    ftp.connect(ps5["host"], int(ps5.get("port") or 2121))
-    ftp.login(ps5.get("user") or "anonymous", ps5.get("password") or "")
-    ftp.set_pasv(ps5.get("passive", True))
-    ftp.voidcmd("TYPE I")
+    try:
+        ftp.connect(host, port)
+        ftp.login(ps5.get("user") or "anonymous", ps5.get("password") or "")
+        ftp.set_pasv(ps5.get("passive", True))
+        ftp.voidcmd("TYPE I")
+    except ftplib.error_perm:
+        ftp.close()
+        raise  # wrong user/password: retrying will not help
+    except CONNECTION_ERRORS as e:
+        ftp.close()
+        raise PS5Unreachable(
+            f"Could not reach the PS5 FTP server at {host}:{port} ({str(e) or e.__class__.__name__}). "
+            "Make sure the FTP payload is running (it stops in rest mode) and that no other "
+            "FTP client is connected: the PS5 only accepts one at a time.") from e
     return ftp
+
+
+def _sleep(seconds, run=None):
+    """Sleep, but wake up early when the run is cancelled."""
+    if run is not None:
+        if run.cancel_event.wait(seconds):
+            raise Cancelled()
+    else:
+        time.sleep(seconds)
+
+
+def connect_with_retry(ps5, run=None, logger=log):
+    for attempt, delay in enumerate(RETRY_DELAYS + (None,)):
+        try:
+            return connect(ps5)
+        except PS5Unreachable as e:
+            if delay is None:
+                raise
+            logger.warning("%s Retrying in %ss (%d/%d)...", e, delay, attempt + 1, len(RETRY_DELAYS))
+            _sleep(delay, run)
 
 
 def test_connection(ps5):
@@ -59,36 +109,53 @@ def _quit(ftp):
 
 
 class RemoteTree:
-    """Caches remote directory listings (name -> size, or None for dirs)."""
+    """Caches remote directory listings (name -> size, or None for dirs).
 
-    def __init__(self, ftp):
+    PS5 FTP payloads are picky, so listings avoid every optional feature:
+
+    * No NLST and no `OPTS MLST` (ftpsrv answers 502 to both).
+    * MLSD is only ever sent *without* an argument, after a CWD. ftpsrv advertises
+      MLSD in FEAT but ignores its path argument and lists `/` instead, which would
+      make every folder look like it holds the PS5 root.
+    * If MLSD is refused (any 5xx) we log it once and use `LIST` from then on.
+    """
+
+    def __init__(self, ftp, logger=log):
         self.ftp = ftp
         self.cache = {}
         self.use_mlsd = True
+        self.logger = logger
 
     def listdir(self, path):
         if path in self.cache:
             return self.cache[path]
-        entries = {}
         try:
-            if self.use_mlsd:
-                try:
-                    for name, facts in self.ftp.mlsd(path, facts=["type", "size"]):
-                        if name in (".", ".."):
-                            continue
-                        kind = facts.get("type", "file")
-                        if kind in ("cdir", "pdir"):
-                            continue
-                        entries[name] = None if kind == "dir" else int(facts.get("size", -1))
-                except ftplib.error_perm as e:
-                    if str(e).startswith("550"):
-                        raise
-                    self.use_mlsd = False
-            if not self.use_mlsd:
-                entries = self._list_fallback(path)
+            self.ftp.cwd(path)
         except ftplib.error_perm:
             entries = None  # directory does not exist
+        else:
+            entries = self._read_cwd(path)
         self.cache[path] = entries
+        return entries
+
+    def _read_cwd(self, path):
+        if self.use_mlsd:
+            try:
+                return self._list_mlsd()
+            except (ftplib.error_perm, ftplib.error_reply) as e:
+                self.use_mlsd = False
+                self.logger.info("FTP server refused MLSD (%s); using LIST instead", e)
+        return self._list_fallback(path)
+
+    def _list_mlsd(self):
+        entries = {}
+        for name, facts in self.ftp.mlsd():
+            if name in (".", ".."):
+                continue
+            kind = facts.get("type", "file")
+            if kind in ("cdir", "pdir"):
+                continue
+            entries[name] = None if kind == "dir" else int(facts.get("size", -1))
         return entries
 
     def _list_fallback(self, path):
@@ -102,7 +169,10 @@ class RemoteTree:
             name = parts[8]
             if name in (".", ".."):
                 continue
-            entries[name] = None if line.startswith("d") else int(parts[4])
+            try:
+                entries[name] = None if line.startswith("d") else int(parts[4])
+            except ValueError:
+                continue
         return entries
 
     def ensure_dir(self, path):
@@ -126,6 +196,22 @@ class RemoteTree:
                 raise
         siblings[name] = None
         self.cache[path] = {}
+
+
+def remote_rel(rel, folder_per_game=False):
+    """Where a library file goes, relative to the sync's PS5 folder.
+
+    With folder_per_game, `Hacks/Mario Kart.rvz` becomes `Hacks/Mario Kart/Mario Kart.rvz`
+    (Porpoise setups usually keep one folder per game). Files already inside a folder
+    named after themselves are left alone, so a second sync does not nest again.
+    """
+    if not folder_per_game:
+        return rel
+    folder, name = posixpath.split(rel)
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    if posixpath.basename(folder) == stem:
+        return rel
+    return posixpath.join(folder, stem, name)
 
 
 def walk_local(src, extensions):
@@ -180,12 +266,15 @@ def plan_files(job, romm_settings=None, logger=log):
     one PS5 folder, which is what "delete files no longer in the library" needs."""
     remote_root = job["remote_path"].rstrip("/") or "/"
     platform_id, collection_id = job.get("romm_platform_id"), job.get("romm_collection_id")
+    per_game = bool(job.get("folder_per_game"))
 
     if platform_id is None and collection_id is None:
         src = resolve_source(job["source"])
         if not os.path.isdir(src):
-            raise FileNotFoundError(f"Source folder not found: {job['source'] or '/'}")
-        files = [(rel, full, size, posixpath.join(remote_root, rel))
+            hint = (f" The library folder {LIBRARY_ROOT} is empty or not mounted: is the drive or NAS plugged in?"
+                    if library_is_empty() else "")
+            raise FileNotFoundError(f"Source folder not found: {job['source'] or '/'}.{hint}")
+        files = [(rel, full, size, posixpath.join(remote_root, remote_rel(rel, per_game)))
                  for rel, full, size in walk_local(src, job["extensions"])]
         return files, remote_root
 
@@ -194,7 +283,7 @@ def plan_files(job, romm_settings=None, logger=log):
     files, missing = [], 0
     for rom in roms:
         if platform_id is not None:
-            root, exts = remote_root, job["extensions"]
+            root, exts, nest = remote_root, job["extensions"], per_game
         else:
             where = romm.suggest_target(romm.rom_platform_slug(rom))
             if not where:
@@ -203,6 +292,7 @@ def plan_files(job, romm_settings=None, logger=log):
                 continue
             root = where["remote_path"]
             exts = job["extensions"] or PRESETS[where["target"]]["extensions"]
+            nest = per_game and where["target"] == "porpoise"
         rel_local = romm.rom_relpath(rom)
         try:
             full = resolve_source(rel_local)
@@ -213,7 +303,8 @@ def plan_files(job, romm_settings=None, logger=log):
         if not found and not os.path.exists(full):
             missing += 1
             logger.warning("[%s] %s is in RomM but not in the library mount", job["name"], rel_local)
-        files.extend((rel, path, size, posixpath.join(root, rel)) for rel, path, size in found)
+        files.extend((rel, path, size, posixpath.join(root, remote_rel(rel, nest)))
+                     for rel, path, size in found)
     if roms and missing == len(roms):
         raise FileNotFoundError(f"None of RomM's files were found under {LIBRARY_ROOT}. "
                                 "Mount RomM's library folder there.")
@@ -228,16 +319,44 @@ def run_sync(job, ps5, run: JobRun, logger=log, romm_settings=None):
     run.bytes_total = sum(f[2] for f in files)
     logger.info("[%s] %d local files (%.1f MB) -> %s", job["name"], len(files),
                 run.bytes_total / 1e6, mirror_root or "PS5 (per system)")
+    if not files:
+        # Nothing to do, and certainly nothing to delete: an empty folder usually means the
+        # drive or NAS holding the library is not mounted, not that the library was emptied.
+        where = f"/{job['source']}" if job["source"] else "the library"
+        why = (f"The library folder {LIBRARY_ROOT} is empty or not mounted: is the drive or NAS plugged in?"
+               if library_is_empty() else
+               "Check the folder, and the file types filter" + (f" ({', '.join(job['extensions'])})"
+                                                              if job["extensions"] else "") + ".")
+        run.state = "warning"
+        run.message = f"No files found in {where}. Nothing was uploaded or deleted. {why}"
+        run.finished_at = time.time()
+        logger.warning("[%s] %s", job["name"], run.message)
+        return
 
-    ftp = connect(ps5)
+    tree = RemoteTree(connect_with_retry(ps5, run, logger), logger)
+
+    def retrying(what, op):
+        """Run op(); if the connection drops, reconnect with backoff and run it again."""
+        for attempt, delay in enumerate(RETRY_DELAYS + (None,)):
+            try:
+                return op()
+            except CONNECTION_ERRORS as e:
+                if delay is None:
+                    raise
+                logger.warning("[%s] connection lost while %s (%s); reconnecting in %ss (%d/%d)",
+                               job["name"], what, str(e) or e.__class__.__name__, delay,
+                               attempt + 1, len(RETRY_DELAYS))
+                _sleep(delay, run)
+                _quit(tree.ftp)
+                tree.ftp = connect_with_retry(ps5, run, logger)
+
     try:
-        tree = RemoteTree(ftp)
         if mirror_root:
-            tree.ensure_dir(mirror_root)
+            retrying("preparing the folder", lambda: tree.ensure_dir(mirror_root))
         to_upload = []
         for rel, full, size, remote in files:
             rdir, rname = posixpath.split(remote)
-            listing = tree.listdir(rdir) or {}
+            listing = retrying("listing the PS5 folder", lambda: tree.listdir(rdir)) or {}
             if listing.get(rname) == size:
                 run.files_skipped += 1
                 run.files_done += 1
@@ -250,18 +369,22 @@ def run_sync(job, ps5, run: JobRun, logger=log, romm_settings=None):
                 raise Cancelled()
             run.current_file = rel
             rdir, rname = posixpath.split(remote)
-            tree.ensure_dir(rdir)
-            _upload(ftp, full, remote, run)
+
+            def put():
+                tree.ensure_dir(rdir)
+                _upload(tree.ftp, full, remote, run)
+
+            retrying(f"uploading {rel}", put)
             (tree.listdir(rdir) or {})[rname] = size
             run.files_uploaded += 1
             run.files_done += 1
-            logger.info("[%s] uploaded %s", job["name"], rel)
+            logger.info("[%s] uploaded %s (%s)", job["name"], rel, _fmt_bytes(size))
 
         if job.get("mirror_deletes") and mirror_root:
             local = {posixpath.relpath(remote, mirror_root) for _, _, _, remote in files}
-            _mirror_deletes(ftp, tree, mirror_root, "", local, job["extensions"], run, job, logger)
+            _mirror_deletes(tree.ftp, tree, mirror_root, "", local, job["extensions"], run, job, logger)
     finally:
-        _quit(ftp)
+        _quit(tree.ftp)
 
     run.current_file = ""
     run.state = "done"
@@ -269,6 +392,23 @@ def run_sync(job, ps5, run: JobRun, logger=log, romm_settings=None):
     run.message = (f"{run.files_uploaded} uploaded, {run.files_skipped} already there"
                    + (f", {run.files_deleted} removed" if run.files_deleted else ""))
     logger.info("[%s] done: %s", job["name"], run.message)
+
+
+def list_remote_folders(ps5, path, timeout=6):
+    """Names of the sub-folders of `path` on the PS5 (empty if it does not exist)."""
+    ftp = connect(ps5, timeout=timeout)
+    try:
+        entries = RemoteTree(ftp).listdir(path) or {}
+    finally:
+        _quit(ftp)
+    return sorted(name for name, size in entries.items() if size is None)
+
+
+def _fmt_bytes(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
 
 
 def _upload(ftp, full, remote, run):
@@ -285,13 +425,13 @@ def _upload(ftp, full, remote, run):
             ftp.storbinary(f"STOR {tmp}", f, BLOCK_SIZE, callback=on_block)
     except BaseException:
         run.bytes_done = start_bytes
-        _try(ftp.delete, tmp)
+        _try(_delete, ftp, tmp)
         raise
     try:
         ftp.rename(tmp, remote)
     except ftplib.error_perm:
         # Some servers refuse to rename over an existing file.
-        _try(ftp.delete, remote)
+        _try(_delete, ftp, remote)
         ftp.rename(tmp, remote)
 
 
@@ -306,9 +446,19 @@ def _mirror_deletes(ftp, tree, root, rel_dir, local, extensions, run, job, logge
         if exts and name.rsplit(".", 1)[-1].lower() not in exts:
             continue
         if rel not in local:
-            ftp.delete(posixpath.join(root, rel))
+            _delete(ftp, posixpath.join(root, rel))
             run.files_deleted += 1
             logger.info("[%s] removed %s (not in library)", job["name"], rel)
+
+
+def _delete(ftp, path):
+    """DELE that accepts any 2xx reply.
+
+    ftplib's FTP.delete() only accepts 250 (and 200). ftpsrv, the FTP payload most
+    PS5 setups use, answers `226 File deleted`, which makes ftplib raise error_reply
+    even though the file is gone.
+    """
+    ftp.voidcmd(f"DELE {path}")
 
 
 def _try(fn, *args):
