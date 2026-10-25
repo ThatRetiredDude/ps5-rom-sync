@@ -458,3 +458,56 @@ def test_folder_per_game_is_off_by_default_and_saved_with_the_job(ftp_server, li
     r = c.post("/api/jobs", json={"target": "porpoise", "source": "gamecube", "folder_per_game": True})
     assert r.get_json()["folder_per_game"] is True
     assert ConfigStore(store.path).list_jobs()[1]["folder_per_game"] is True
+
+
+def test_guess_system_for_common_library_folder_names():
+    guess = presets.guess_system
+    assert guess("snes") == "snes" and guess("SNES") == "snes" and guess("sfc") == "snes"
+    assert guess("dc") == "dreamcast" and guess("gbc") == "gbc" and guess("gameboycolor") == "gbc"
+    assert guess("genesis-slash-megadrive") == "genesis" and guess("Mega Drive") == "genesis"
+    assert guess("ngc") == "gc" and guess("saturn") == "saturn" and guess("/psx/") == "psx"
+    assert guess("roms/n64") == "n64"
+    assert guess("My Homebrew") is None and guess("") is None
+
+
+def test_guess_system_prefers_folders_that_exist_on_the_ps5():
+    # The PS5 folders from a real setup, and the library folders that feed them.
+    on_ps5 = ["Saturn", "dreamcast", "gameboycolor", "gc", "genesis", "n64", "nes", "snes", "Wii"]
+    expected = {"dc": "dreamcast", "gbc": "gameboycolor", "genesis-slash-megadrive": "genesis",
+                "n64": "n64", "nes": "nes", "ngc": "gc", "saturn": "Saturn", "snes": "snes"}
+    for library_folder, ps5_folder in expected.items():
+        assert presets.guess_system(library_folder, on_ps5) == ps5_folder
+    # No folder yet for that console: fall back to the standard name.
+    assert presets.guess_system("gba", on_ps5) == "gba"
+    # Unknown to the alias list, but spelled like an existing folder.
+    assert presets.guess_system("wii", on_ps5) == "Wii"
+
+
+def test_guess_system_endpoint_uses_ps5_folders(ftp_server, library, tmp_path):
+    base = ftp_server["root"] / "data/homebrew/PPSA99169/content"
+    for name in ("gameboycolor", "Saturn", "dreamcast"):
+        (base / name).mkdir(parents=True)
+    c, _ = _client(tmp_path)
+    c.put("/api/ps5", json={"host": "127.0.0.1", "port": ftp_server["port"]})
+    r = c.get("/api/guess-system?folder=gbc").get_json()
+    assert r == {"system": "gameboycolor", "from_ps5": True}
+    assert c.get("/api/guess-system?folder=saturn").get_json()["system"] == "Saturn"
+    assert c.get("/api/guess-system?folder=snes").get_json()["system"] == "snes"
+
+
+def test_guess_system_endpoint_works_offline_and_leaves_a_busy_ps5_alone(ftpsrv_server, library, tmp_path):
+    c, _ = _client(tmp_path)
+    c.put("/api/ps5", json={"host": "127.0.0.1", "port": 1})  # nothing listens: PS5 is off
+    assert c.get("/api/guess-system?folder=dc").get_json() == {"system": "dreamcast", "from_ps5": False}
+
+    # While a sync is running the PS5 must not get a second connection.
+    c.put("/api/ps5", json={"host": "127.0.0.1", "port": ftpsrv_server["port"]})
+    manager = c.application.config["manager"]
+    manager.runs["busy"] = JobRun("busy")
+    manager.runs["busy"].state = "running"
+    assert c.get("/api/guess-system?folder=dc").get_json()["from_ps5"] is False
+    assert ftpsrv_server["seen"] == []
+
+    manager.runs["busy"].state = "done"
+    assert c.get("/api/guess-system?folder=dc").get_json()["from_ps5"] is True
+    assert ftpsrv_server["seen"]

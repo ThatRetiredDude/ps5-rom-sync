@@ -134,7 +134,7 @@ Open **`http://<your-server-ip>:8585`**, type in the PS5's IP and FTP port, then
 **RetroArch:**
 1. Hit **➕** and pick **RetroArch (ROMs)**.
 2. **Browse** to a system folder in your library, like `SNES`.
-3. Set **RetroArch system folder** to `snes`. It's guessed for you when your folder name matches.
+3. Set **RetroArch system folder** to `snes`. It's guessed for you: common names (`dc`, `gbc`, `genesis-slash-megadrive`, `ngc`, `sfc`, `psx`…) are mapped to RetroArch's names, and if your PS5 already has a folder for that console (say `Saturn` or `gameboycolor`) its exact spelling is used. The guess asks the PS5 over FTP, but never while a sync is running.
 4. Hit **Save**.
 
 **Porpoise:**

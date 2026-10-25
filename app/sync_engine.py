@@ -337,6 +337,16 @@ def run_sync(job, ps5, run: JobRun, logger=log):
     logger.info("[%s] done: %s", job["name"], run.message)
 
 
+def list_remote_folders(ps5, path, timeout=6):
+    """Names of the sub-folders of `path` on the PS5 (empty if it does not exist)."""
+    ftp = connect(ps5, timeout=timeout)
+    try:
+        entries = RemoteTree(ftp).listdir(path) or {}
+    finally:
+        _quit(ftp)
+    return sorted(name for name, size in entries.items() if size is None)
+
+
 def _fmt_bytes(n):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":

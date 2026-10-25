@@ -243,12 +243,19 @@ function updateRemote() {
 $("subfolder").oninput = updateRemote;
 $("remote").oninput = () => remoteTouched = true;
 $("exts").oninput = () => extsTouched = true;
+let guessTimer = null;
 $("source").oninput = () => {
-  if (meta.presets[target]?.needs_subfolder && !$("subfolder").dataset.touched) {
-    const last = $("source").value.split("/").filter(Boolean).pop() || "";
-    const guess = meta.retroarch_systems.find((s) => s === last.toLowerCase());
-    if (guess) { $("subfolder").value = guess; updateRemote(); }
-  }
+  if (!meta.presets[target]?.needs_subfolder || $("subfolder").dataset.touched) return;
+  const last = $("source").value.split("/").filter(Boolean).pop() || "";
+  clearTimeout(guessTimer);
+  if (!last) return;
+  // Debounced: this asks the PS5 which folders it already has, and its FTP server is fragile.
+  guessTimer = setTimeout(async () => {
+    try {
+      const g = await api("GET", "/api/guess-system?folder=" + encodeURIComponent(last));
+      if (g.system && !$("subfolder").dataset.touched) { $("subfolder").value = g.system; updateRemote(); }
+    } catch (e) { /* no guess */ }
+  }, 600);
 };
 $("subfolder").addEventListener("input", () => $("subfolder").dataset.touched = "1");
 

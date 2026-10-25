@@ -5,8 +5,9 @@ import os
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 from .config_store import ConfigStore
-from .presets import PRESETS, RETROARCH_SYSTEMS, remote_path_for
-from .sync_engine import LIBRARY_ROOT, SyncManager, library_is_empty, resolve_source, test_connection
+from .presets import PRESETS, RETROARCH_SYSTEMS, guess_system, remote_path_for
+from .sync_engine import (LIBRARY_ROOT, SyncManager, library_is_empty, list_remote_folders,
+                          resolve_source, test_connection)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -103,6 +104,24 @@ def create_app(store=None, start_manager=True, ui_password=None, ui_user=None):
             return jsonify(test_connection(settings))
         except Exception as e:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(e) or e.__class__.__name__})
+
+    @app.get("/api/guess-system")
+    def guess_retroarch_system():
+        """Suggest the RetroArch content folder for a library folder name.
+
+        Prefers a folder that already exists on the PS5 (asked over FTP), but never while a
+        sync is running: the PS5 FTP server only handles one connection at a time.
+        """
+        folder = request.args.get("folder", "")
+        existing, from_ps5 = [], False
+        idle = not any(r["state"] in ("queued", "running") for r in manager.status().values())
+        if idle and store.get_ps5().get("host"):
+            try:
+                existing = list_remote_folders(store.get_ps5(), PRESETS["retroarch"]["remote_base"])
+                from_ps5 = True
+            except Exception:  # noqa: BLE001 - the PS5 may be off; the offline guess still works
+                pass
+        return jsonify({"system": guess_system(folder, existing), "from_ps5": from_ps5})
 
     @app.get("/api/browse")
     def browse():
