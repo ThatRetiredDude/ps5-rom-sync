@@ -1,4 +1,5 @@
 import os
+import socket
 import threading
 
 import pytest
@@ -218,3 +219,84 @@ def test_remote_tree_reports_missing_directory(ftp_server):
         assert tree.listdir("/") == {}
     finally:
         ftp.close()
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    monkeypatch.setattr(sync_engine, "RETRY_DELAYS", (0, 0, 0))
+
+
+def test_unreachable_ps5_gets_a_helpful_message(library, no_backoff):
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]  # nothing listens here once the socket is closed
+    ps5 = {"host": "127.0.0.1", "port": port, "user": "anonymous", "password": ""}
+    with pytest.raises(sync_engine.PS5Unreachable) as exc:
+        run_sync(job(), ps5, JobRun("x"))
+    assert "only accepts one" in str(exc.value) and f"127.0.0.1:{port}" in str(exc.value)
+
+
+def test_retries_when_server_is_busy_at_first(tmp_path, library, no_backoff):
+    class BusyFirst(FTPHandler):
+        calls = []
+
+        def handle(self):
+            self.calls.append(1)
+            if len(self.calls) == 1:
+                self.respond("421 Too many connections")
+                self.close_when_done()
+            else:
+                super().handle()
+
+    root = tmp_path / "ps5-busy"
+    root.mkdir()
+    server, ps5 = _start_server(root, BusyFirst)
+    try:
+        ps5["handler"].calls = []
+        run = JobRun("x")
+        run_sync(job(), ps5, run)
+        assert run.files_uploaded == 2 and len(ps5["handler"].calls) == 2
+    finally:
+        server.close_all()
+
+
+def test_reconnects_and_retries_when_connection_drops_mid_upload(tmp_path, library, no_backoff):
+    class DropsOnce(FTPHandler):
+        stors = []
+
+        def ftp_STOR(self, file, mode="w"):
+            self.stors.append(file)
+            if len(self.stors) == 1:
+                self.close()  # the PS5 FTP payload just hangs up
+                return None
+            return super().ftp_STOR(file, mode)
+
+    root = tmp_path / "ps5-drops"
+    root.mkdir()
+    server, ps5 = _start_server(root, DropsOnce)
+    try:
+        ps5["handler"].stors = []
+        run = JobRun("x")
+        run_sync(job(), ps5, run)
+        dest = root / "data/homebrew/PPSA99169/content/snes"
+        assert run.state == "done" and run.files_uploaded == 2
+        assert (dest / "Chrono Trigger.sfc").stat().st_size == 5000
+        assert not list(dest.rglob("*.part"))
+        assert run.bytes_done == run.bytes_total  # the failed attempt is not counted twice
+    finally:
+        server.close_all()
+
+
+def test_gives_up_after_the_last_retry(tmp_path, library, no_backoff):
+    class AlwaysDrops(FTPHandler):
+        def ftp_STOR(self, file, mode="w"):
+            self.close()
+
+    root = tmp_path / "ps5-dead"
+    root.mkdir()
+    server, ps5 = _start_server(root, AlwaysDrops)
+    try:
+        with pytest.raises(Exception):
+            run_sync(job(), ps5, JobRun("x"))
+    finally:
+        server.close_all()

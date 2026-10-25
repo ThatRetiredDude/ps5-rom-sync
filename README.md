@@ -179,6 +179,12 @@ Hit **Sync now** on a card, or **Sync all** at the top. The progress bar and the
 </details>
 
 <details>
+<summary><b>The sync stops with "connection lost" or "could not reach the PS5 FTP server"</b></summary>
+
+The PS5 FTP payload only serves **one client at a time** and drops connections easily. If a connection drops mid-sync, ROM Sync reconnects and retries the file up to three times (after 2, 5 and 10 seconds) before giving up. Close any other FTP client (Cyberduck, FileZilla…) while a sync runs, and re-run the payload if the PS5 was in rest mode.
+</details>
+
+<details>
 <summary><b>Games copied but RetroArch doesn't show them</b></summary>
 
 In RetroArch, use **Import Content → Scan Directory** and pick `/app0/content/<system>`. That's the same folder as `/data/homebrew/PPSA99169/content/<system>` on the PS5.

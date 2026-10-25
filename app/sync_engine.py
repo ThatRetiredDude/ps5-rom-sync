@@ -27,15 +27,57 @@ def resolve_source(source):
     return path
 
 
+# Seconds to wait before each retry after the FTP connection drops. The PS5 FTP payload
+# serves one client at a time and falls over easily, so a short, patient backoff helps.
+RETRY_DELAYS = (2, 5, 10)
+# Errors that mean "the connection is gone or the server is busy", worth reconnecting for.
+CONNECTION_ERRORS = (OSError, EOFError, ftplib.error_temp, ftplib.error_reply)
+
+
+class PS5Unreachable(ConnectionError):
+    pass
+
+
 def connect(ps5, timeout=15):
     if not ps5.get("host"):
         raise ValueError("Set your PS5 IP address first")
+    host, port = ps5["host"], int(ps5.get("port") or 2121)
     ftp = ftplib.FTP(timeout=timeout)
-    ftp.connect(ps5["host"], int(ps5.get("port") or 2121))
-    ftp.login(ps5.get("user") or "anonymous", ps5.get("password") or "")
-    ftp.set_pasv(ps5.get("passive", True))
-    ftp.voidcmd("TYPE I")
+    try:
+        ftp.connect(host, port)
+        ftp.login(ps5.get("user") or "anonymous", ps5.get("password") or "")
+        ftp.set_pasv(ps5.get("passive", True))
+        ftp.voidcmd("TYPE I")
+    except ftplib.error_perm:
+        ftp.close()
+        raise  # wrong user/password: retrying will not help
+    except CONNECTION_ERRORS as e:
+        ftp.close()
+        raise PS5Unreachable(
+            f"Could not reach the PS5 FTP server at {host}:{port} ({str(e) or e.__class__.__name__}). "
+            "Make sure the FTP payload is running (it stops in rest mode) and that no other "
+            "FTP client is connected: the PS5 only accepts one at a time.") from e
     return ftp
+
+
+def _sleep(seconds, run=None):
+    """Sleep, but wake up early when the run is cancelled."""
+    if run is not None:
+        if run.cancel_event.wait(seconds):
+            raise Cancelled()
+    else:
+        time.sleep(seconds)
+
+
+def connect_with_retry(ps5, run=None, logger=log):
+    for attempt, delay in enumerate(RETRY_DELAYS + (None,)):
+        try:
+            return connect(ps5)
+        except PS5Unreachable as e:
+            if delay is None:
+                raise
+            logger.warning("%s Retrying in %ss (%d/%d)...", e, delay, attempt + 1, len(RETRY_DELAYS))
+            _sleep(delay, run)
 
 
 def test_connection(ps5):
@@ -194,15 +236,30 @@ def run_sync(job, ps5, run: JobRun, logger=log):
     logger.info("[%s] %d local files (%.1f MB) -> %s", job["name"], len(files),
                 run.bytes_total / 1e6, remote_root)
 
-    ftp = connect(ps5)
+    tree = RemoteTree(connect_with_retry(ps5, run, logger), logger)
+
+    def retrying(what, op):
+        """Run op(); if the connection drops, reconnect with backoff and run it again."""
+        for attempt, delay in enumerate(RETRY_DELAYS + (None,)):
+            try:
+                return op()
+            except CONNECTION_ERRORS as e:
+                if delay is None:
+                    raise
+                logger.warning("[%s] connection lost while %s (%s); reconnecting in %ss (%d/%d)",
+                               job["name"], what, str(e) or e.__class__.__name__, delay,
+                               attempt + 1, len(RETRY_DELAYS))
+                _sleep(delay, run)
+                _quit(tree.ftp)
+                tree.ftp = connect_with_retry(ps5, run, logger)
+
     try:
-        tree = RemoteTree(ftp, logger)
-        tree.ensure_dir(remote_root)
+        retrying("preparing the folder", lambda: tree.ensure_dir(remote_root))
         to_upload = []
         for rel, full, size in files:
             remote = posixpath.join(remote_root, rel)
             rdir, rname = posixpath.split(remote)
-            listing = tree.listdir(rdir) or {}
+            listing = retrying("listing the PS5 folder", lambda: tree.listdir(rdir)) or {}
             if listing.get(rname) == size:
                 run.files_skipped += 1
                 run.files_done += 1
@@ -215,18 +272,22 @@ def run_sync(job, ps5, run: JobRun, logger=log):
                 raise Cancelled()
             run.current_file = rel
             rdir, rname = posixpath.split(remote)
-            tree.ensure_dir(rdir)
-            _upload(ftp, full, remote, run)
+
+            def put():
+                tree.ensure_dir(rdir)
+                _upload(tree.ftp, full, remote, run)
+
+            retrying(f"uploading {rel}", put)
             (tree.listdir(rdir) or {})[rname] = size
             run.files_uploaded += 1
             run.files_done += 1
-            logger.info("[%s] uploaded %s", job["name"], rel)
+            logger.info("[%s] uploaded %s (%s)", job["name"], rel, _fmt_bytes(size))
 
         if job.get("mirror_deletes"):
             local = {rel for rel, _, _ in files}
-            _mirror_deletes(ftp, tree, remote_root, "", local, job["extensions"], run, job, logger)
+            _mirror_deletes(tree.ftp, tree, remote_root, "", local, job["extensions"], run, job, logger)
     finally:
-        _quit(ftp)
+        _quit(tree.ftp)
 
     run.current_file = ""
     run.state = "done"
@@ -234,6 +295,13 @@ def run_sync(job, ps5, run: JobRun, logger=log):
     run.message = (f"{run.files_uploaded} uploaded, {run.files_skipped} already there"
                    + (f", {run.files_deleted} removed" if run.files_deleted else ""))
     logger.info("[%s] done: %s", job["name"], run.message)
+
+
+def _fmt_bytes(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
 
 
 def _upload(ftp, full, remote, run):
