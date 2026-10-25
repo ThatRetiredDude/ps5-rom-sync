@@ -29,6 +29,7 @@ class FtpsrvLikeHandler(FTPHandler):
 
     * DELE is answered with `226 File deleted` instead of `250`.
     * MLSD ignores its path argument and lists the root; only a bare MLSD lists the cwd.
+      (Emulated by rewriting `MLSD <path>` to `MLSD /`.)
     * OPTS, NLST and EPSV are not implemented (502).
     """
 
@@ -37,8 +38,16 @@ class FtpsrvLikeHandler(FTPHandler):
             resp = "226 File deleted"
         return super().respond(resp, *args, **kwargs)
 
-    def ftp_MLSD(self, path):
-        return super().ftp_MLSD("/" if path and path != self.fs.cwd else path)
+    seen = None  # set per server: every raw command line received
+
+    def pre_process_command(self, line, cmd, arg):
+        if self.seen is not None:
+            self.seen.append(line)
+        if cmd == "MLSD" and arg:
+            # ftpsrv lists the *root* when MLSD gets an argument it does not understand.
+            # Emulate that by rewriting the command to MLSD of "/".
+            line, arg = "MLSD /", "/"
+        return super().pre_process_command(line, cmd, arg)
 
     def _unsupported(self, line):
         self.respond("502 Command not recognized")
@@ -60,6 +69,7 @@ def ftpsrv_server(tmp_path):
     root = tmp_path / "ps5-ftpsrv"
     root.mkdir()
     server, info = _start_server(root, FtpsrvLikeHandler)
+    info["handler"].seen = info["seen"] = []
     yield info
     server.close_all()
 
@@ -160,3 +170,51 @@ def test_mirror_deletes_accepts_ftpsrv_226_reply(ftpsrv_server, library):
                  extensions=["iso", "rvz"], mirror_deletes=True), ftpsrv_server, run)
     assert run.state == "done" and run.files_deleted == 2
     assert sorted(p.name for p in dest.iterdir()) == ["Melee.rvz"]
+
+
+def test_listing_never_sends_optional_commands_to_ftpsrv(ftpsrv_server, library):
+    run_sync(job(), ftpsrv_server, JobRun("x"))
+    again = JobRun("x")
+    run_sync(job(), ftpsrv_server, again)
+    # Skipping proves the folder was listed correctly (MLSD <path> would list "/").
+    assert again.files_uploaded == 0 and again.files_skipped == 2
+    verbs = [line.split(" ")[0] for line in ftpsrv_server["seen"]]
+    assert "NLST" not in verbs and "EPSV" not in verbs and "OPTS" not in verbs
+    assert not [line for line in ftpsrv_server["seen"] if line.startswith("MLSD ")]
+
+
+def test_falls_back_to_list_when_mlsd_is_refused(tmp_path, library):
+    class NoMlsd(FTPHandler):
+        seen = []
+
+        def pre_process_command(self, line, cmd, arg):
+            self.seen.append(line)
+            return super().pre_process_command(line, cmd, arg)
+
+        def ftp_MLSD(self, path):
+            self.respond("502 Command not recognized")
+
+    root = tmp_path / "ps5-nomlsd"
+    root.mkdir()
+    server, ps5 = _start_server(root, NoMlsd)
+    try:
+        ps5["handler"].seen = []
+        run_sync(job(), ps5, JobRun("x"))
+        again = JobRun("x")
+        run_sync(job(), ps5, again)
+        assert again.files_uploaded == 0 and again.files_skipped == 2
+        verbs = [line.split(" ")[0] for line in ps5["handler"].seen]
+        assert verbs.count("MLSD") == 2  # once per sync (one connection each), then LIST
+        assert "LIST" in verbs
+    finally:
+        server.close_all()
+
+
+def test_remote_tree_reports_missing_directory(ftp_server):
+    ftp = sync_engine.connect(ftp_server)
+    try:
+        tree = sync_engine.RemoteTree(ftp)
+        assert tree.listdir("/nope/not/here") is None
+        assert tree.listdir("/") == {}
+    finally:
+        ftp.close()

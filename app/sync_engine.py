@@ -56,36 +56,53 @@ def _quit(ftp):
 
 
 class RemoteTree:
-    """Caches remote directory listings (name -> size, or None for dirs)."""
+    """Caches remote directory listings (name -> size, or None for dirs).
 
-    def __init__(self, ftp):
+    PS5 FTP payloads are picky, so listings avoid every optional feature:
+
+    * No NLST and no `OPTS MLST` (ftpsrv answers 502 to both).
+    * MLSD is only ever sent *without* an argument, after a CWD. ftpsrv advertises
+      MLSD in FEAT but ignores its path argument and lists `/` instead, which would
+      make every folder look like it holds the PS5 root.
+    * If MLSD is refused (any 5xx) we log it once and use `LIST` from then on.
+    """
+
+    def __init__(self, ftp, logger=log):
         self.ftp = ftp
         self.cache = {}
         self.use_mlsd = True
+        self.logger = logger
 
     def listdir(self, path):
         if path in self.cache:
             return self.cache[path]
-        entries = {}
         try:
-            if self.use_mlsd:
-                try:
-                    for name, facts in self.ftp.mlsd(path, facts=["type", "size"]):
-                        if name in (".", ".."):
-                            continue
-                        kind = facts.get("type", "file")
-                        if kind in ("cdir", "pdir"):
-                            continue
-                        entries[name] = None if kind == "dir" else int(facts.get("size", -1))
-                except ftplib.error_perm as e:
-                    if str(e).startswith("550"):
-                        raise
-                    self.use_mlsd = False
-            if not self.use_mlsd:
-                entries = self._list_fallback(path)
+            self.ftp.cwd(path)
         except ftplib.error_perm:
             entries = None  # directory does not exist
+        else:
+            entries = self._read_cwd(path)
         self.cache[path] = entries
+        return entries
+
+    def _read_cwd(self, path):
+        if self.use_mlsd:
+            try:
+                return self._list_mlsd()
+            except (ftplib.error_perm, ftplib.error_reply) as e:
+                self.use_mlsd = False
+                self.logger.info("FTP server refused MLSD (%s); using LIST instead", e)
+        return self._list_fallback(path)
+
+    def _list_mlsd(self):
+        entries = {}
+        for name, facts in self.ftp.mlsd():
+            if name in (".", ".."):
+                continue
+            kind = facts.get("type", "file")
+            if kind in ("cdir", "pdir"):
+                continue
+            entries[name] = None if kind == "dir" else int(facts.get("size", -1))
         return entries
 
     def _list_fallback(self, path):
@@ -99,7 +116,10 @@ class RemoteTree:
             name = parts[8]
             if name in (".", ".."):
                 continue
-            entries[name] = None if line.startswith("d") else int(parts[4])
+            try:
+                entries[name] = None if line.startswith("d") else int(parts[4])
+            except ValueError:
+                continue
         return entries
 
     def ensure_dir(self, path):
@@ -176,7 +196,7 @@ def run_sync(job, ps5, run: JobRun, logger=log):
 
     ftp = connect(ps5)
     try:
-        tree = RemoteTree(ftp)
+        tree = RemoteTree(ftp, logger)
         tree.ensure_dir(remote_root)
         to_upload = []
         for rel, full, size in files:
