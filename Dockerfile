@@ -13,5 +13,5 @@ COPY app ./app
 
 VOLUME ["/config"]
 EXPOSE 8585
-HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request,os;urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"WEB_PORT\"]}/api/meta')" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request,os;urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"WEB_PORT\"]}/healthz')" || exit 1
 CMD ["python", "-m", "app.main"]
