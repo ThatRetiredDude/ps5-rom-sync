@@ -195,6 +195,22 @@ class RemoteTree:
         self.cache[path] = {}
 
 
+def remote_rel(rel, folder_per_game=False):
+    """Where a library file goes, relative to the sync's PS5 folder.
+
+    With folder_per_game, `Hacks/Mario Kart.rvz` becomes `Hacks/Mario Kart/Mario Kart.rvz`
+    (Porpoise setups usually keep one folder per game). Files already inside a folder
+    named after themselves are left alone, so a second sync does not nest again.
+    """
+    if not folder_per_game:
+        return rel
+    folder, name = posixpath.split(rel)
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    if posixpath.basename(folder) == stem:
+        return rel
+    return posixpath.join(folder, stem, name)
+
+
 def walk_local(src, extensions):
     exts = {e.lower() for e in extensions}
     for dirpath, dirnames, filenames in os.walk(src):
@@ -259,6 +275,7 @@ def run_sync(job, ps5, run: JobRun, logger=log):
         logger.warning("[%s] %s", job["name"], run.message)
         return
 
+    per_game = bool(job.get("folder_per_game"))
     tree = RemoteTree(connect_with_retry(ps5, run, logger), logger)
 
     def retrying(what, op):
@@ -280,7 +297,7 @@ def run_sync(job, ps5, run: JobRun, logger=log):
         retrying("preparing the folder", lambda: tree.ensure_dir(remote_root))
         to_upload = []
         for rel, full, size in files:
-            remote = posixpath.join(remote_root, rel)
+            remote = posixpath.join(remote_root, remote_rel(rel, per_game))
             rdir, rname = posixpath.split(remote)
             listing = retrying("listing the PS5 folder", lambda: tree.listdir(rdir)) or {}
             if listing.get(rname) == size:
@@ -307,7 +324,7 @@ def run_sync(job, ps5, run: JobRun, logger=log):
             logger.info("[%s] uploaded %s (%s)", job["name"], rel, _fmt_bytes(size))
 
         if job.get("mirror_deletes"):
-            local = {rel for rel, _, _ in files}
+            local = {remote_rel(rel, per_game) for rel, _, _ in files}
             _mirror_deletes(tree.ftp, tree, remote_root, "", local, job["extensions"], run, job, logger)
     finally:
         _quit(tree.ftp)

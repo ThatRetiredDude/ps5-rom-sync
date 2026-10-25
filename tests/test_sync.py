@@ -8,7 +8,7 @@ from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
 
-from app import sync_engine
+from app import presets, sync_engine
 from app.config_store import ConfigStore
 from app.main import create_app
 from app.sync_engine import JobRun, run_sync
@@ -394,3 +394,67 @@ def test_ui_password_and_user_come_from_the_environment(tmp_path, monkeypatch):
     token = base64.b64encode(b"jared:pw").decode()
     assert c.get("/api/meta").status_code == 401
     assert c.get("/api/meta", headers={"Authorization": f"Basic {token}"}).status_code == 200
+
+
+def test_porpoise_and_retroarch_paths_can_be_overridden(monkeypatch):
+    default = presets.build_presets({})
+    assert default["porpoise"]["remote_base"] == "/data/porpoise/games"
+    assert default["retroarch"]["remote_base"] == "/data/homebrew/PPSA99169/content"
+
+    env = {"PORPOISE_GAMES_DIR": "/data/homebrew/PPSA99764/porpoise/games/",
+           "PORPOISE_COVERS_DIR": "/data/homebrew/PPSA99764/porpoise/covers",
+           "RETROARCH_DIR": "/data/homebrew/PPSA12345"}
+    custom = presets.build_presets(env)
+    assert custom["porpoise"]["remote_base"] == "/data/homebrew/PPSA99764/porpoise/games"
+    assert "/data/homebrew/PPSA99764/porpoise/games" in custom["porpoise"]["help"]
+    assert custom["porpoise-covers"]["remote_base"] == "/data/homebrew/PPSA99764/porpoise/covers"
+    assert custom["retroarch"]["remote_base"] == "/data/homebrew/PPSA12345/content"
+    assert custom["retroarch-bios"]["remote_base"] == "/data/homebrew/PPSA12345/system"
+
+    monkeypatch.setattr(presets, "PRESETS", custom)
+    assert presets.remote_path_for("porpoise") == "/data/homebrew/PPSA99764/porpoise/games"
+    assert presets.remote_path_for("retroarch", "snes") == "/data/homebrew/PPSA12345/content/snes"
+
+
+def test_remote_rel_folder_per_game():
+    rel = sync_engine.remote_rel
+    assert rel("Melee.rvz") == "Melee.rvz"
+    assert rel("Melee.rvz", True) == "Melee/Melee.rvz"
+    assert rel("Hacks/Mario Kart - Double Dash!! (USA).rvz", True) == \
+        "Hacks/Mario Kart - Double Dash!! (USA)/Mario Kart - Double Dash!! (USA).rvz"
+    assert rel("Melee/Melee.rvz", True) == "Melee/Melee.rvz"  # already in its own folder
+    assert rel("Game v1.2.iso", True) == "Game v1.2/Game v1.2.iso"
+
+
+def test_folder_per_game_upload_skip_and_mirror(ftp_server, library):
+    dest = ftp_server["root"] / "games"
+    dest.mkdir()
+    (dest / "Melee.rvz").write_bytes(b"c" * 9000)  # loose copy from before the option
+    (dest / "Old Game").mkdir()
+    (dest / "Old Game" / "Old Game.iso").write_bytes(b"x")
+    kw = dict(source="gamecube", remote_path="/games", extensions=["rvz", "iso"], folder_per_game=True)
+
+    run = JobRun("x")
+    run_sync(job(**kw), ftp_server, run)
+    assert (dest / "Melee" / "Melee.rvz").read_bytes() == b"c" * 9000
+    assert (dest / "Melee.rvz").exists() and (dest / "Old Game" / "Old Game.iso").exists()  # no deletes
+    assert run.files_uploaded == 1
+
+    again = JobRun("x")
+    run_sync(job(**kw), ftp_server, again)
+    assert again.files_uploaded == 0 and again.files_skipped == 1
+    assert not (dest / "Melee" / "Melee").exists()
+
+    # With mirroring on, the new layout is what counts as "in the library".
+    run_sync(job(mirror_deletes=True, **kw), ftp_server, JobRun("x"))
+    assert (dest / "Melee" / "Melee.rvz").exists()
+    assert not (dest / "Melee.rvz").exists() and not (dest / "Old Game" / "Old Game.iso").exists()
+
+
+def test_folder_per_game_is_off_by_default_and_saved_with_the_job(ftp_server, library, tmp_path):
+    store = ConfigStore(str(tmp_path / "config" / "config.json"))
+    c = create_app(store, start_manager=False).test_client()
+    assert c.post("/api/jobs", json={"target": "porpoise", "source": "gamecube"}).get_json()["folder_per_game"] is False
+    r = c.post("/api/jobs", json={"target": "porpoise", "source": "gamecube", "folder_per_game": True})
+    assert r.get_json()["folder_per_game"] is True
+    assert ConfigStore(store.path).list_jobs()[1]["folder_per_game"] is True

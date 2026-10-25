@@ -26,6 +26,7 @@ JOB_FIELDS = {
     "extensions": [],
     "interval_minutes": 0,
     "mirror_deletes": False,
+    "folder_per_game": False,
     "enabled": True,
 }
 
@@ -103,6 +104,7 @@ class ConfigStore:
         job["extensions"] = _normalize_exts(job["extensions"])
         job["interval_minutes"] = max(0, int(job["interval_minutes"] or 0))
         job["mirror_deletes"] = bool(job["mirror_deletes"])
+        job["folder_per_game"] = bool(job["folder_per_game"])
         job["enabled"] = bool(job["enabled"])
         job["remote_path"] = "/" + str(job["remote_path"]).strip().strip("/")
         return job

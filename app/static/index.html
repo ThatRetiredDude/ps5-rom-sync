@@ -145,6 +145,7 @@
       <div class="field small"><label for="interval">Auto-sync (min)</label><input id="interval" type="number" min="0" placeholder="0 = off"></div>
     </div>
     <div class="field"><label for="name">Name</label><input id="name" placeholder="SNES to RetroArch"></div>
+    <label class="check" id="perGameRow"><input type="checkbox" id="perGame"> Put each game in its own folder named after the file</label>
     <label class="check"><input type="checkbox" id="mirror"> Delete files on the PS5 that are no longer in the library</label>
     <div class="foot">
       <button type="button" class="danger" id="deleteJob" style="margin-right:auto;display:none">Delete</button>
@@ -222,6 +223,7 @@ function renderTargets() {
   const p = meta.presets[target] || {};
   $("targetHelp").textContent = p.help || "";
   $("subfolderField").style.display = p.needs_subfolder ? "" : "none";
+  $("perGameRow").style.display = target === "porpoise" ? "" : "none";
 }
 
 function selectTarget(key) {
@@ -283,6 +285,7 @@ function openDialog(job) {
   $("name").value = job?.name || "";
   $("interval").value = job?.interval_minutes || "";
   $("mirror").checked = !!job?.mirror_deletes;
+  $("perGame").checked = !!job?.folder_per_game;
   target = job?.target || (jobs.some((j) => j.target === "retroarch") ? "porpoise" : "retroarch");
   if (jobs.some((j) => j.target === "porpoise") && jobs.some((j) => j.target === "retroarch") && !job) target = "custom";
   renderTargets();
@@ -305,6 +308,7 @@ $("jobForm").onsubmit = async (ev) => {
     target, source: $("source").value.replace(/^\/+/, ""), subfolder: $("subfolder").value.trim(),
     remote_path: $("remote").value.trim(), extensions: $("exts").value,
     interval_minutes: Number($("interval").value || 0), mirror_deletes: $("mirror").checked,
+    folder_per_game: target === "porpoise" && $("perGame").checked,
     name: $("name").value.trim(),
   };
   if (!body.name) {
