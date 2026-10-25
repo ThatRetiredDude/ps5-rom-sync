@@ -50,6 +50,10 @@
   .badge.running { color: var(--accent); border-color: var(--accent); }
   .badge.done { color: var(--ok); border-color: var(--ok); }
   .badge.error { color: var(--err); border-color: var(--err); }
+  .badge.warning { color: var(--warn); border-color: var(--warn); }
+  .job-status.warning { color: var(--warn); }
+  .banner { background: rgba(245,158,11,.12); border: 1px solid var(--warn); color: var(--warn);
+            border-radius: var(--radius); padding: 10px 14px; margin-bottom: 16px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .bar { height: 6px; background: var(--panel2); border-radius: 99px; overflow: hidden; margin-top: 12px; }
   .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
@@ -61,6 +65,7 @@
   .log { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; max-height: 220px; overflow: auto;
          background: var(--bg); border-radius: 8px; padding: 10px; white-space: pre-wrap; color: var(--muted); }
   .log .ERROR { color: var(--err); }
+  .log .WARNING { color: var(--warn); }
   dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line);
            border-radius: var(--radius); padding: 0; width: min(560px, calc(100vw - 32px)); }
   dialog::backdrop { background: rgba(0,0,0,.6); }
@@ -87,6 +92,7 @@
   <button id="runAll">Sync all</button>
 </header>
 <main>
+  <div class="banner" id="libBanner" style="display:none">⚠️ The library folder is empty or not mounted, so there is nothing to sync. Is the drive or NAS plugged in?</div>
   <section class="panel">
     <h2>Your PS5</h2>
     <div class="row">
@@ -139,6 +145,7 @@
       <div class="field small"><label for="interval">Auto-sync (min)</label><input id="interval" type="number" min="0" placeholder="0 = off"></div>
     </div>
     <div class="field"><label for="name">Name</label><input id="name" placeholder="SNES to RetroArch"></div>
+    <label class="check" id="perGameRow"><input type="checkbox" id="perGame"> Put each game in its own folder named after the file</label>
     <label class="check"><input type="checkbox" id="mirror"> Delete files on the PS5 that are no longer in the library</label>
     <div class="foot">
       <button type="button" class="danger" id="deleteJob" style="margin-right:auto;display:none">Delete</button>
@@ -180,15 +187,22 @@ function fmtBytes(n) {
 
 async function loadPs5() {
   const p = await api("GET", "/api/ps5");
-  $("host").value = p.host; $("port").value = p.port; $("user").value = p.user; $("password").value = p.password;
+  $("host").value = p.host; $("port").value = p.port; $("user").value = p.user;
+  // The saved password is never sent to the browser; leave the box alone to keep it.
+  $("password").value = ""; $("password").placeholder = p.has_password ? "(saved)" : "";
+  delete $("password").dataset.dirty;
 }
 
 function ps5Form() {
-  return { host: $("host").value, port: $("port").value || 2121, user: $("user").value, password: $("password").value };
+  const form = { host: $("host").value, port: $("port").value || 2121, user: $("user").value };
+  if ($("password").dataset.dirty) form.password = $("password").value;  // blank + edited = clear it
+  return form;
 }
 
+$("password").addEventListener("input", () => $("password").dataset.dirty = "1");
+
 $("savePs5").onclick = async () => {
-  try { await api("PUT", "/api/ps5", ps5Form()); hint("Saved.", "ok"); testPs5(); }
+  try { await api("PUT", "/api/ps5", ps5Form()); hint("Saved.", "ok"); await loadPs5(); testPs5(); }
   catch (e) { hint(e.message, "err"); }
 };
 $("testPs5").onclick = () => testPs5();
@@ -209,6 +223,7 @@ function renderTargets() {
   const p = meta.presets[target] || {};
   $("targetHelp").textContent = p.help || "";
   $("subfolderField").style.display = p.needs_subfolder ? "" : "none";
+  $("perGameRow").style.display = target === "porpoise" ? "" : "none";
 }
 
 function selectTarget(key) {
@@ -228,12 +243,19 @@ function updateRemote() {
 $("subfolder").oninput = updateRemote;
 $("remote").oninput = () => remoteTouched = true;
 $("exts").oninput = () => extsTouched = true;
+let guessTimer = null;
 $("source").oninput = () => {
-  if (meta.presets[target]?.needs_subfolder && !$("subfolder").dataset.touched) {
-    const last = $("source").value.split("/").filter(Boolean).pop() || "";
-    const guess = meta.retroarch_systems.find((s) => s === last.toLowerCase());
-    if (guess) { $("subfolder").value = guess; updateRemote(); }
-  }
+  if (!meta.presets[target]?.needs_subfolder || $("subfolder").dataset.touched) return;
+  const last = $("source").value.split("/").filter(Boolean).pop() || "";
+  clearTimeout(guessTimer);
+  if (!last) return;
+  // Debounced: this asks the PS5 which folders it already has, and its FTP server is fragile.
+  guessTimer = setTimeout(async () => {
+    try {
+      const g = await api("GET", "/api/guess-system?folder=" + encodeURIComponent(last));
+      if (g.system && !$("subfolder").dataset.touched) { $("subfolder").value = g.system; updateRemote(); }
+    } catch (e) { /* no guess */ }
+  }, 600);
 };
 $("subfolder").addEventListener("input", () => $("subfolder").dataset.touched = "1");
 
@@ -270,6 +292,7 @@ function openDialog(job) {
   $("name").value = job?.name || "";
   $("interval").value = job?.interval_minutes || "";
   $("mirror").checked = !!job?.mirror_deletes;
+  $("perGame").checked = !!job?.folder_per_game;
   target = job?.target || (jobs.some((j) => j.target === "retroarch") ? "porpoise" : "retroarch");
   if (jobs.some((j) => j.target === "porpoise") && jobs.some((j) => j.target === "retroarch") && !job) target = "custom";
   renderTargets();
@@ -292,6 +315,7 @@ $("jobForm").onsubmit = async (ev) => {
     target, source: $("source").value.replace(/^\/+/, ""), subfolder: $("subfolder").value.trim(),
     remote_path: $("remote").value.trim(), extensions: $("exts").value,
     interval_minutes: Number($("interval").value || 0), mirror_deletes: $("mirror").checked,
+    folder_per_game: target === "porpoise" && $("perGame").checked,
     name: $("name").value.trim(),
   };
   if (!body.name) {
@@ -332,7 +356,7 @@ function renderJobs() {
         </div>
       </div>
       <div class="bar"><div style="width:${pct}%"></div></div>
-      <div class="job-status">${esc(status)}</div>
+      <div class="job-status ${state}">${esc(status)}</div>
     </div>`;
   }).join("");
   $("jobs").querySelectorAll("button[data-a]").forEach((b) => b.onclick = async () => {
@@ -361,6 +385,7 @@ async function poll() {
 
 (async () => {
   meta = await api("GET", "/api/meta");
+  $("libBanner").style.display = meta.library_empty ? "" : "none";
   $("systems").innerHTML = meta.retroarch_systems.map((s) => `<option value="${s}">`).join("");
   await loadPs5();
   await loadJobs();

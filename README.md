@@ -44,6 +44,8 @@ A tiny Docker container that copies your retro game library to a jailbroken PS5 
 | 🖼️ **Porpoise (covers)** | `/data/porpoise/covers` | Box art PNGs named by disc ID, like `GALE01.png` |
 | 📁 **Custom** | anything you type | Other emulators and homebrew |
 
+> 📌 These are the *documented* defaults, but PS5 installs differ. Check each path against your console (browse it with any FTP client) and either edit it per sync or set `PORPOISE_GAMES_DIR` / `RETROARCH_DIR` once for all new syncs.
+
 Paths come from the [PS5 RetroArch port](https://github.com/bigdaddydev805/PS5_RetroArch) and the [Porpoise README](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5). You can edit any of them per sync if your setup is different.
 
 ---
@@ -132,7 +134,7 @@ Open **`http://<your-server-ip>:8585`**, type in the PS5's IP and FTP port, then
 **RetroArch:**
 1. Hit **➕** and pick **RetroArch (ROMs)**.
 2. **Browse** to a system folder in your library, like `SNES`.
-3. Set **RetroArch system folder** to `snes`. It's guessed for you when your folder name matches.
+3. Set **RetroArch system folder** to `snes`. It's guessed for you: common names (`dc`, `gbc`, `genesis-slash-megadrive`, `ngc`, `sfc`, `psx`…) are mapped to RetroArch's names, and if your PS5 already has a folder for that console (say `Saturn` or `gameboycolor`) its exact spelling is used. The guess asks the PS5 over FTP, but never while a sync is running.
 4. Hit **Save**.
 
 **Porpoise:**
@@ -156,7 +158,8 @@ Hit **Sync now** on a card, or **Sync all** at the top. The progress bar and the
 |---|---|
 | **Only these file types** | Comma-separated extensions, like `sfc, smc, zip`. Blank copies everything. |
 | **Auto-sync (min)** | Re-sync every N minutes. `0` turns it off. |
-| **Delete files on the PS5…** | Removes files from the PS5 folder that aren't in your library anymore. Only touches files of the chosen types, only inside that sync's folder. Off by default. |
+| **Put each game in its own folder** | Porpoise only, off by default. Copies `Mario Kart.rvz` to `Mario Kart/Mario Kart.rvz`, for setups that keep one folder per game. Turn it off if your games are loose files. Combined with *Delete files on the PS5…*, loose copies from before are removed. |
+| **Delete files on the PS5…** | Removes files from the PS5 folder that aren't in your library anymore. Only touches files of the chosen types, only inside that sync's folder. Off by default. If the library folder is empty or missing (say the NAS is unplugged), the sync stops with a warning and deletes nothing. |
 
 ## 🔧 Environment variables
 
@@ -167,6 +170,13 @@ Hit **Sync now** on a card, or **Sync all** at the top. The progress bar and the
 | `PS5_FTP_PORT` | `2121` | Pre-fills the FTP port |
 | `LIBRARY_ROOT` | `/roms` | Where the library is mounted inside the container |
 | `CONFIG_DIR` | `/config` | Where `config.json` is saved |
+| `PORPOISE_GAMES_DIR` | `/data/porpoise/games` | Porpoise's games folder on your PS5. Many setups differ, e.g. `/data/homebrew/PPSA99764/porpoise/games`. Sets the default for new Porpoise syncs. |
+| `PORPOISE_COVERS_DIR` | `/data/porpoise/covers` | Same, for cover art |
+| `RETROARCH_DIR` | `/data/homebrew/PPSA99169` | RetroArch's folder on the PS5 (the one holding `content/`, `system/` and `config/`) |
+| `UI_PASSWORD` | blank | Set it to ask for a login (HTTP basic auth) before the web page and API work. Blank means no login. |
+| `UI_USER` | `admin` | User name for that login |
+
+> 🔒 The web page can change your PS5's FTP settings and copy files, so with no `UI_PASSWORD` anyone on your network can use it. Set one if the network isn't just you. The FTP password you save is never sent back to the browser.
 
 ## 🩺 Troubleshooting
 
@@ -176,6 +186,12 @@ Hit **Sync now** on a card, or **Sync all** at the top. The progress bar and the
 - Make sure the FTP payload is actually running. It stops when the PS5 goes into rest mode or reboots.
 - Double-check the port: `2121` for ftpsrv, `1337` for etaHEN.
 - The server running Docker has to be on the same network as the PS5.
+</details>
+
+<details>
+<summary><b>The sync stops with "connection lost" or "could not reach the PS5 FTP server"</b></summary>
+
+The PS5 FTP payload only serves **one client at a time** and drops connections easily. If a connection drops mid-sync, ROM Sync reconnects and retries the file up to three times (after 2, 5 and 10 seconds) before giving up. Close any other FTP client (Cyberduck, FileZilla…) while a sync runs, and re-run the payload if the PS5 was in rest mode.
 </details>
 
 <details>
@@ -199,7 +215,7 @@ Use a wired connection on the PS5 if you can. Syncs run one at a time on purpose
 <details>
 <summary><b>My library folder is empty in Browse</b></summary>
 
-The `/roms` volume isn't mounted, or it points somewhere else. Check the `volumes:` line in your compose file.
+The `/roms` volume isn't mounted, or it points somewhere else. Check the `volumes:` line in your compose file. If the drive or NAS holding your ROMs is unplugged, Docker mounts an empty folder instead: ROM Sync shows a warning banner, marks the sync **warning** (instead of "done") and never deletes anything on the PS5 in that case.
 </details>
 
 ## 🧑‍💻 Development
