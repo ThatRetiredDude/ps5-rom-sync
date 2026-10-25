@@ -230,13 +230,13 @@ def _upload(ftp, full, remote, run):
             ftp.storbinary(f"STOR {tmp}", f, BLOCK_SIZE, callback=on_block)
     except BaseException:
         run.bytes_done = start_bytes
-        _try(ftp.delete, tmp)
+        _try(_delete, ftp, tmp)
         raise
     try:
         ftp.rename(tmp, remote)
     except ftplib.error_perm:
         # Some servers refuse to rename over an existing file.
-        _try(ftp.delete, remote)
+        _try(_delete, ftp, remote)
         ftp.rename(tmp, remote)
 
 
@@ -251,9 +251,19 @@ def _mirror_deletes(ftp, tree, root, rel_dir, local, extensions, run, job, logge
         if exts and name.rsplit(".", 1)[-1].lower() not in exts:
             continue
         if rel not in local:
-            ftp.delete(posixpath.join(root, rel))
+            _delete(ftp, posixpath.join(root, rel))
             run.files_deleted += 1
             logger.info("[%s] removed %s (not in library)", job["name"], rel)
+
+
+def _delete(ftp, path):
+    """DELE that accepts any 2xx reply.
+
+    ftplib's FTP.delete() only accepts 250 (and 200). ftpsrv, the FTP payload most
+    PS5 setups use, answers `226 File deleted`, which makes ftplib raise error_reply
+    even though the file is gone.
+    """
+    ftp.voidcmd(f"DELE {path}")
 
 
 def _try(fn, *args):

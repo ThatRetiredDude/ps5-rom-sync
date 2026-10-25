@@ -12,18 +12,55 @@ from app.main import create_app
 from app.sync_engine import JobRun, run_sync
 
 
-@pytest.fixture
-def ftp_server(tmp_path):
-    root = tmp_path / "ps5"
-    root.mkdir()
+def _start_server(root, handler_base=FTPHandler):
     auth = DummyAuthorizer()
     auth.add_anonymous(str(root), perm="elradfmwMT")
-    handler = type("H", (FTPHandler,), {"authorizer": auth})
+    handler = type("H", (handler_base,), {"authorizer": auth})
     server = FTPServer(("127.0.0.1", 0), handler)
     port = server.socket.getsockname()[1]
     t = threading.Thread(target=server.serve_forever, kwargs={"timeout": 0.1}, daemon=True)
     t.start()
-    yield {"host": "127.0.0.1", "port": port, "user": "anonymous", "password": "", "root": root}
+    return server, {"host": "127.0.0.1", "port": port, "user": "anonymous", "password": "",
+                    "root": root, "handler": handler}
+
+
+class FtpsrvLikeHandler(FTPHandler):
+    """Mimics the quirks of ftpsrv (the PS5 FTP payload) that we hit on real hardware.
+
+    * DELE is answered with `226 File deleted` instead of `250`.
+    * MLSD ignores its path argument and lists the root; only a bare MLSD lists the cwd.
+    * OPTS, NLST and EPSV are not implemented (502).
+    """
+
+    def respond(self, resp, *args, **kwargs):
+        if resp.startswith("250 File removed"):
+            resp = "226 File deleted"
+        return super().respond(resp, *args, **kwargs)
+
+    def ftp_MLSD(self, path):
+        return super().ftp_MLSD("/" if path and path != self.fs.cwd else path)
+
+    def _unsupported(self, line):
+        self.respond("502 Command not recognized")
+
+    ftp_OPTS = ftp_NLST = ftp_EPSV = _unsupported
+
+
+@pytest.fixture
+def ftp_server(tmp_path):
+    root = tmp_path / "ps5"
+    root.mkdir()
+    server, info = _start_server(root)
+    yield info
+    server.close_all()
+
+
+@pytest.fixture
+def ftpsrv_server(tmp_path):
+    root = tmp_path / "ps5-ftpsrv"
+    root.mkdir()
+    server, info = _start_server(root, FtpsrvLikeHandler)
+    yield info
     server.close_all()
 
 
@@ -110,3 +147,16 @@ def test_api_flow(ftp_server, library, tmp_path):
     assert c.post("/api/jobs", json={"target": "custom", "source": "../x"}).status_code == 400
     assert c.get("/api/browse").get_json()["dirs"] == ["gamecube", "snes"]
     assert len(ConfigStore(store.path).list_jobs()) == 2
+
+
+def test_mirror_deletes_accepts_ftpsrv_226_reply(ftpsrv_server, library):
+    # ftpsrv answers DELE with "226 File deleted"; ftplib's delete() raises on that.
+    dest = ftpsrv_server["root"] / "data/porpoise/games"
+    dest.mkdir(parents=True)
+    (dest / "Old1.iso").write_bytes(b"x")
+    (dest / "Old2.iso").write_bytes(b"x")
+    run = JobRun("x")
+    run_sync(job(source="gamecube", remote_path="/data/porpoise/games",
+                 extensions=["iso", "rvz"], mirror_deletes=True), ftpsrv_server, run)
+    assert run.state == "done" and run.files_deleted == 2
+    assert sorted(p.name for p in dest.iterdir()) == ["Melee.rvz"]
