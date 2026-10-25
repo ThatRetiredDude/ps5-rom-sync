@@ -511,3 +511,37 @@ def test_guess_system_endpoint_works_offline_and_leaves_a_busy_ps5_alone(ftpsrv_
     manager.runs["busy"].state = "done"
     assert c.get("/api/guess-system?folder=dc").get_json()["from_ps5"] is True
     assert ftpsrv_server["seen"]
+
+
+def test_changed_file_is_replaced_even_if_server_refuses_rename_over_existing(tmp_path, library):
+    class NoRenameOver(FTPHandler):
+        def ftp_RNTO(self, path):
+            if os.path.exists(self.fs.ftp2fs(path)):
+                self.fs.rnfr = None
+                self.respond("550 File exists.")
+                return None
+            return super().ftp_RNTO(path)
+
+    root = tmp_path / "ps5-norename"
+    root.mkdir()
+    server, ps5 = _start_server(root, NoRenameOver)
+    try:
+        run_sync(job(), ps5, JobRun("x"))
+        (library / "snes" / "Chrono Trigger.sfc").write_bytes(b"z" * 6000)
+        run = JobRun("x")
+        run_sync(job(), ps5, run)
+        dest = root / "data/homebrew/PPSA99169/content/snes"
+        assert run.files_uploaded == 1
+        assert (dest / "Chrono Trigger.sfc").read_bytes() == b"z" * 6000
+        assert not list(dest.rglob("*.part"))
+    finally:
+        server.close_all()
+
+
+def test_changed_file_on_ftpsrv_like_server(ftpsrv_server, library):
+    run_sync(job(), ftpsrv_server, JobRun("x"))
+    (library / "snes" / "Chrono Trigger.sfc").write_bytes(b"q" * 123)  # shrinks
+    run = JobRun("x")
+    run_sync(job(), ftpsrv_server, run)
+    dest = ftpsrv_server["root"] / "data/homebrew/PPSA99169/content/snes"
+    assert run.files_uploaded == 1 and (dest / "Chrono Trigger.sfc").read_bytes() == b"q" * 123
